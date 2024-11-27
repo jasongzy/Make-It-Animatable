@@ -154,7 +154,7 @@
                   </a>
                 </span>
                 <!-- Dataset Link. -->
-                <span class="link-block">
+                <!-- <span class="link-block">
                   <a href="https://huggingface.co/datasets/jasongzy/Mixamo"
                     class="external-link button is-normal is-rounded is-dark">
                     <span class="icon">
@@ -162,20 +162,24 @@
                     </span>
                     <span>Data</span>
                   </a>
-                  <!-- Model Link. -->
-                  <span class="link-block">
-                    <a href="https://huggingface.co/jasongzy/Make-It-Animatable"
-                      class="external-link button is-normal is-rounded is-dark">
-                      <span>🤗 Model</span>
-                    </a>
-                  </span>
-                  <!-- Demo Link. -->
-                  <span class="link-block">
-                    <a href="https://huggingface.co/spaces/jasongzy/Make-It-Animatable"
-                      class="external-link button is-normal is-rounded is-dark">
-                      <span>🤗 Demo</span>
-                    </a>
-                  </span>
+                </span> -->
+                <!-- Model Link. -->
+                <!-- <span class="link-block">
+                  <a href="https://huggingface.co/jasongzy/Make-It-Animatable"
+                    class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon">
+                      <i class="far fa-file-archive"></i>
+                    </span>
+                    <span>Model</span>
+                  </a>
+                </span> -->
+                <!-- Demo Link. -->
+                <span class="link-block">
+                  <a href="https://huggingface.co/spaces/jasongzy/Make-It-Animatable"
+                    class="external-link button is-normal is-rounded is-dark">
+                    <span>🤗 Demo</span>
+                  </a>
+                </span>
               </div>
 
             </div>
@@ -200,31 +204,23 @@
   <section class="hero is-light is-small">
     <div class="hero-body">
       <div class="container">
-        <div id="results-carousel" class="carousel results-carousel">
-          <div class="item">
-            <video poster="" id="steve" autoplay controls muted loop playsinline height="100%">
-              <source src="./static/videos/showcase_lq.mp4" type="video/mp4">
-            </video>
+        <div class="columns is-centered">
+          <div class="column">
+            <div class="content">
+              <video autoplay muted loop playsinline height="100%">
+                <source src="./static/videos/showcase_lq.mp4" type="video/mp4">
+              </video>
+            </div>
           </div>
-          <div class="item">
-            <video poster="" id="chair-tp" autoplay controls muted loop playsinline height="100%">
-              <source src="./static/videos/showcase_gs_lq.mp4" type="video/mp4">
-            </video>
-          </div>
-          <div class="item">
-            <video poster="" id="shiba" autoplay controls muted loop playsinline height="100%">
-              <source src="./static/videos/application_lq.mp4" type="video/mp4">
-            </video>
-          </div>
-          <div class="item">
-            <video poster="" id="fullbody" autoplay controls muted loop playsinline height="100%">
-              <source src="./static/videos/screen_record_lq.mp4" type="video/mp4">
-            </video>
+          <div class="column">
+            <div class="content">
+              <video autoplay muted loop playsinline height="100%">
+                <source src="./static/videos/showcase_gs_lq.mp4" type="video/mp4">
+              </video>
+            </div>
           </div>
         </div>
       </div>
-    </div>
-    </div>
   </section>
 
 
@@ -293,10 +289,42 @@
             <video autoplay controls muted loop playsinline height="100%">
               <source src="./static/videos/screen_record_lq.mp4" type="video/mp4">
             </video>
+
+            <div class="container is-max-desktop">
+              <div id="results-carousel" class="carousel results-carousel">
+                <div class="item">
+                  <video poster="" autoplay controls muted loop playsinline height="100%">
+                    <source src="./static/videos/bunny_demo.mp4" type="video/mp4">
+                  </video>
+                </div>
+                <div class="item">
+                  <video poster="" autoplay controls muted loop playsinline height="100%">
+                    <source src="./static/videos/biden_demo.mp4" type="video/mp4">
+                  </video>
+                </div>
+                <div class="item">
+                  <video poster="" autoplay controls muted loop playsinline height="100%">
+                    <source src="./static/videos/biden_blender.mp4" type="video/mp4">
+                  </video>
+                </div>
+                <div class="item">
+                  <video poster="" autoplay controls muted loop playsinline height="100%">
+                    <source src="./static/videos/boy_demo.mp4" type="video/mp4">
+                  </video>
+                </div>
+                <div class="item">
+                  <video poster="" autoplay controls muted loop playsinline height="100%">
+                    <source src="./static/videos/boy_blender.mp4" type="video/mp4">
+                  </video>
+                </div>
+              </div>
+            </div>
+
           </div>
         </div>
 
       </div>
+    </div>
   </section>
 
 
@@ -308,13 +336,13 @@
           <div class="content">
             <h2 class="title is-3">Real-World Application</h2>
             <p>
-              Integrate <i>Make-It-Animatable</i> with an off-the-shelf image-to-3D generator, you can bring your
+              Integrate <span class="dnerf">Make-It-Animatable</span> with an off-the-shelf image-to-3D generator, you can bring your
               character figure to live.
             </p>
-            <video autoplay controls muted loop playsinline height="100%">
+            <video autoplay muted loop playsinline height="100%">
               <source src="./static/videos/application_lq.mp4" type="video/mp4">
             </video>
-            <video autoplay controls muted loop playsinline height="100%">
+            <video autoplay muted loop playsinline height="100%">
               <source src="./static/videos/fight.mp4" type="video/mp4">
             </video>
           </div>
