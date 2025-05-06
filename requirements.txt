@@ -13,7 +13,7 @@ PyMCubes
 
 bpy==4.0.0
 fake-bpy-module
-gradio>=5.10
+gradio>=5.25.0
 ipykernel
 ipympl
 matplotlib

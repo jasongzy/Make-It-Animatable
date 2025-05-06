@@ -480,9 +480,9 @@ def vis_joints(
     return scene
 
 
-def change_Model3D(value: str = None, is_pc=False):
-    # display_mode = "point_cloud" if is_pc else "solid"
-    display_mode = "solid"
+def change_Model3D(value: str = None, display_mode="solid", is_pc=False):
+    if is_pc:
+        display_mode = "point_cloud"
     return gr.Model3D(value=value, display_mode=display_mode)
 
 
@@ -517,7 +517,7 @@ def ply2visible(ply_path: str, is_gs=False):
         print(f"Get input: {ply_path}")
 
     if not ply_path.endswith(".ply") or is_gs:
-        return change_Model3D(ply_path, False)
+        return change_Model3D(ply_path, is_pc=False)
     with contextlib.suppress(Exception):
         load_gs(ply_path)
         gr.Warning("The input file seems to be Gaussian Splats, enable 'Input is GS' to display it")
@@ -525,7 +525,7 @@ def ply2visible(ply_path: str, is_gs=False):
     is_pc = isinstance(mesh, trimesh.PointCloud)
     new_path = f"{os.path.splitext(ply_path)[0]}.glb"
     mesh.export(new_path)
-    return change_Model3D(new_path, is_pc)
+    return change_Model3D(new_path, is_pc=is_pc)
 
 
 def get_masked_mesh(mesh: trimesh.Trimesh, mask: np.ndarray):
@@ -714,9 +714,9 @@ def preprocess(db: DB):
     db.global_transform = global_transform
 
     return {
-        output_joints_coarse: change_Model3D(db.joints_coarse_path, not db.is_mesh),
-        output_normed_input: change_Model3D(db.normed_path, not db.is_mesh),
-        output_sample: db.sample_path,
+        output_joints_coarse: change_Model3D(db.joints_coarse_path, display_mode="wireframe", is_pc=not db.is_mesh),
+        output_normed_input: change_Model3D(db.normed_path, is_pc=not db.is_mesh),
+        output_sample: change_Model3D(db.sample_path, is_pc=True),
         state: db,
     }
 
@@ -936,9 +936,9 @@ def vis(bw_fix: bool, bw_vis_bone: str, no_fingers: bool, db: DB):
     db.pose = pose
 
     return {
-        output_joints: change_Model3D(db.joints_path, not db.is_mesh),
-        output_bw: db.bw_path,
-        output_rest_lbs: change_Model3D(db.rest_lbs_path, not db.is_mesh),
+        output_joints: change_Model3D(db.joints_path, display_mode="wireframe", is_pc=not db.is_mesh),
+        output_bw: change_Model3D(db.bw_path, is_pc=not db.is_mesh),
+        output_rest_lbs: change_Model3D(db.rest_lbs_path, is_pc=not db.is_mesh),
         state: db,
     }
 
@@ -1091,7 +1091,9 @@ def vis_blender(
     if db.is_mesh and db.anim_path.endswith(".fbx") and os.path.isfile(db.anim_path):
         with tempfile.TemporaryDirectory() as tmpdir:
             # https://github.com/facebookincubator/FBX2glTF
-            fbx2glb_cmd = f"util/FBX2glTF --binary --keep-attribute auto --fbx-temp-dir '{tmpdir}' --input '{os.path.abspath(db.anim_path)}' --output '{os.path.abspath(db.anim_vis_path)}'"
+            fbx2glb_path = "util/FBX2glTF"
+            assert os.path.isfile(fbx2glb_path), f"'{fbx2glb_path}' not found"
+            fbx2glb_cmd = f"{fbx2glb_path} --binary --keep-attribute auto --fbx-temp-dir '{tmpdir}' --input '{os.path.abspath(db.anim_path)}' --output '{os.path.abspath(db.anim_vis_path)}'"
             fbx2glb_cmd += " > /dev/null 2>&1"
             os.system(fbx2glb_cmd)
             print(f"Output visualization: '{db.anim_vis_path}'")
@@ -1444,21 +1446,23 @@ def init_blocks():
                     with gr.Tabs():
                         with gr.Tab("Coarse Localization"):
                             output_joints_coarse = gr.Model3D(
-                                label="Joints (coarse)", display_mode="solid", camera_position=camera_position
+                                label="Joints (coarse)", display_mode="wireframe", camera_position=camera_position
                             )
                         with gr.Tab("Canonical Transformation"):
                             output_normed_input = gr.Model3D(
-                                label="Canonical Input", display_mode="solid", camera_position=camera_position
+                                label="Canonicalized Input", display_mode="solid", camera_position=camera_position
                             )
                         with gr.Tab("Sampling"):
                             output_sample = gr.Model3D(
-                                label="Sampled Point Clouds", display_mode="solid", camera_position=camera_position
+                                label="Sampled Point Clouds",
+                                display_mode="point_cloud",
+                                camera_position=camera_position,
                             )
                 with gr.Row():
                     with gr.Tabs():
                         with gr.Tab("Joints"):
                             output_joints = gr.Model3D(
-                                label="Joints", display_mode="solid", camera_position=camera_position
+                                label="Joints", display_mode="wireframe", camera_position=camera_position
                             )
                         with gr.Tab("Blend Weights"):
                             output_bw = gr.Model3D(
@@ -1505,7 +1509,6 @@ def init_blocks():
                 Tips:
                 - To Hugging Face demo users: 3D Gaussian Splats are not supported with the ZeroGPU environment (Python 3.10). Setup an environment with Python 3.11 and run this demo locally to enable GS support.
                 - The output results may not be displayed properly if this browser tab is unfocused during inference.
-                - **GLB** files appear darker here. Download to view them correctly.
                 - If the results suffer from low blend weight quality (typically occurring when limbs are close together, e.g., inner thigh and armpit), try enabling the **Use Normal** option.
                 - If the pose-to-rest transformation is unsatisfactory, try adding prior knowledge by specifying the **Input Rest Pose** and **Input Rest Parts**.
                     - Alternatively, you can uncheck **Reset to Rest** and clear the **Animation File**, so that the animation result becomes an invertible T-pose model that can be adjusted in Blender.
@@ -1659,4 +1662,4 @@ if __name__ == "__main__":
     #     ):
     #         pass
 
-    demo.launch(server_name="0.0.0.0", server_port=7860, allowed_paths=["."], show_error=True, ssr_mode=False)
+    demo.launch(server_name="0.0.0.0", server_port=7860, allowed_paths=[".", ".."], show_error=True, ssr_mode=False)
