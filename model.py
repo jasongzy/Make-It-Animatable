@@ -582,7 +582,7 @@ class PCAE(nn.Module):
             pc: [B, `self.N`, 3]
             queries: [B, N2, 3]
         Returns:
-            [B, N2, `output_dim`]
+            [B, N2, `self.output_dim`]
         """
         if pc.shape[-1] > self.input_dim:
             pc = pc[..., : self.input_dim]
@@ -764,10 +764,18 @@ class Transformer(nn.Module):
                 nn.init.zeros_(layer.linear2.bias)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor = None):
+        """
+        Args:
+            x: [B, N, D]
+            mask: [N, N] bool (False means don't attend)
+        Returns:
+            [B, N, D]
+        """
         # for norm1, attn, norm2, ff in self.layers:
         #     x = attn(norm1(x), mask=mask) + x
         #     x = ff(norm2(x)) + x
-        x = self.layers(x, mask=mask)
+        # assert mask.dtype is torch.bool
+        x = self.layers(x, mask=~mask)
         return x
 
 
@@ -898,30 +906,30 @@ class JointsAttentionCausal(nn.Module):
         Args:
             feat: [B, N, D]
         Returns:
-            [B, N, `out_dim`]
+            [B, N, `self.out_dim`]
         """
         B, N, _ = feat.shape
 
         if self.training:
             assert out_gt is not None and out_gt.shape == (B, N, self.out_dim)
-            # Avoid overfitting
-            if self.out_type == "joints":
-                out_gt += torch.randn_like(out_gt) * 5e-2
-            elif self.out_type == "pose":
-                from pytorch3d.transforms import euler_angles_to_matrix
+            # # Avoid overfitting
+            # if self.out_type == "joints":
+            #     out_gt += torch.randn_like(out_gt) * 5e-2
+            # elif self.out_type == "pose":
+            #     from pytorch3d.transforms import euler_angles_to_matrix
 
-                rand_rot = (torch.randn_like(out_gt[..., :3]) * 30) / 180 * torch.pi
-                rand_rot = euler_angles_to_matrix(rand_rot, "XYZ")
-                if out_gt.shape[-1] == 6:
-                    from util.utils import matrix_to_ortho6d, ortho6d_to_matrix
+            #     rand_rot = (torch.randn_like(out_gt[..., :3]) * 30) / 180 * torch.pi
+            #     rand_rot = euler_angles_to_matrix(rand_rot, "XYZ")
+            #     if out_gt.shape[-1] == 6:
+            #         from util.utils import matrix_to_ortho6d, ortho6d_to_matrix
 
-                    out_gt = matrix_to_ortho6d(rand_rot @ ortho6d_to_matrix(out_gt))
-                elif out_gt.shape[-1] == 4:
-                    from util.utils import matrix_to_quat, quat_to_matrix
+            #         out_gt = matrix_to_ortho6d(rand_rot @ ortho6d_to_matrix(out_gt))
+            #     elif out_gt.shape[-1] == 4:
+            #         from util.utils import matrix_to_quat, quat_to_matrix
 
-                    out_gt = matrix_to_quat(rand_rot @ quat_to_matrix(out_gt))
-                else:
-                    raise NotImplementedError
+            #         out_gt = matrix_to_quat(rand_rot @ quat_to_matrix(out_gt))
+            #     else:
+            #         raise NotImplementedError
             out = self._forward(feat, out_gt)
         else:
             out = torch.zeros((B, N, self.out_dim), dtype=feat.dtype, device=feat.device)
