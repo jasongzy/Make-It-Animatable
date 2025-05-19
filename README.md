@@ -23,31 +23,10 @@ Houqiang Li,
 git clone https://github.com/jasongzy/Make-It-Animatable --recursive --single-branch
 cd Make-It-Animatable
 
-# For training
-conda create -n mia python=3.10
+conda create -n mia python=3.11
 conda activate mia
 pip install -r requirements.txt
-
-# For demo with different dependencies
-conda create -n mia-demo python=3.11
-conda activate mia-demo
-pip install -r requirements-demo.txt
 ```
-
-<details>
-
-<summary>Why have two environments?</summary>
-
-We have to split the environments of training and demo for now because of the following dependency conflict:
-
-- Blender
-  - `bpy==4.0` that requires `python==3.10` works fine for training
-  - `bpy>=4.1` that requires `python==3.11` has bugs and will raise `Segmentation fault` in dataset loading when `num_workers>1` (tested with `bpy==4.3.0`, still buggy)
-- [3DGS Render Blender Addon](https://github.com/Kiri-Innovation/3dgs-render-blender-addon) required by the demo app only supports `bpy>=4.2`
-
-Hope this can be resolved by future updates of Blender.
-
-</details>
 
 ## Data Preparation
 
@@ -123,7 +102,6 @@ So if you want to get rid of the Blender dependency during training, you can ite
 ## Demo for Inference
 
 ```bash
-conda activate mia-demo
 python app.py
 ```
 
@@ -132,7 +110,6 @@ An online demo is also available at [Hugging Face Spaces](https://huggingface.co
 ## Training
 
 ```bash
-conda activate mia
 bash train.sh
 ```
 

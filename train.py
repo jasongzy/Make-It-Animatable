@@ -212,6 +212,7 @@ def main(args):
         pin_memory=args.pin_mem,
         drop_last=True,
         worker_init_fn=seed_worker,
+        persistent_workers=args.num_workers > 0,
     )
     print(f"Train loader: {len(data_loader_train)}")
     data_loader_val = torch.utils.data.DataLoader(
@@ -225,6 +226,7 @@ def main(args):
         pin_memory=args.pin_mem,
         drop_last=False,
         worker_init_fn=seed_worker,
+        persistent_workers=args.num_workers > 0,
     )
     print(f"Val loader: {len(data_loader_val)}")
 

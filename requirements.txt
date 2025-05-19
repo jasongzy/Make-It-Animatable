@@ -1,17 +1,17 @@
-# conda create -n mia python=3.10
+# conda create -n mia python=3.11
 # conda activate mia
 
---extra-index-url https://download.pytorch.org/whl/cu118
-torch==2.0.1
-torchvision==0.15.2
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.1.2
+torchvision==0.16.2
 
 einops
 timm
--f https://data.pyg.org/whl/torch-2.0.1+cu118.html
+-f https://data.pyg.org/whl/torch-2.1.2+cu121.html
 torch-cluster
 PyMCubes
 
-bpy==4.0.0
+bpy==4.3.0
 fake-bpy-module
 gradio>=5.25.0
 ipykernel
@@ -21,10 +21,10 @@ numpy~=1.26.4
 plyfile
 potpourri3d
 shapely
+spaces
 tensorboard~=2.11.2
 tqdm
 trimesh
 # git+https://github.com/facebookresearch/pytorch3d.git@stable
-# pip install --no-index --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu118_pyt201/download.html
 --extra-index-url https://miropsota.github.io/torch_packages_builder
-pytorch3d==0.7.7+pt2.0.1cu118
+pytorch3d==0.7.7+pt2.1.2cu121
