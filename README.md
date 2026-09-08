@@ -28,7 +28,7 @@ Houqiang Li,
 ## Installation
 
 ```bash
-git clone https://github.com/jasongzy/Make-It-Animatable --recursive --single-branch
+git clone https://github.com/jasongzy/Make-It-Animatable --recursive --single-branch --branch v2
 cd Make-It-Animatable
 
 conda create -n mia python=3.11
