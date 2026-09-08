@@ -34,6 +34,7 @@ def get_args_parser():
     )
 
     # Model parameters
+    parser.add_argument("--ae_type", default="vecset", type=str)
     parser.add_argument("--deterministic", type=str2bool, default=True)
     parser.add_argument("--point_cloud_size", default=32768, type=int, help="input size")
     parser.add_argument("--num_latents", default=512, type=int)
@@ -248,6 +249,7 @@ def main(args):
             log_writer = SummaryWriter(log_dir=args.log_dir)
 
     model = PCAE(
+        ae_type=args.ae_type,
         N=args.point_cloud_size,
         input_normal=args.input_normal,
         input_attention=args.input_attention,

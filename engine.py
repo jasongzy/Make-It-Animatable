@@ -26,6 +26,7 @@ from util.utils import (
     pose_rot_to_global,
     quat_to_matrix,
     quat_transl_to_dualquat,
+    robust_dataloader,
     to_pose_local,
     to_pose_matrix,
 )
@@ -497,6 +498,7 @@ def get_loss(output: Output, gt: GT, criterion: torch.nn.Module, args):
     return loss, loss_value_dict, vis_data
 
 
+@robust_dataloader
 def train_one_epoch(
     model: PCAE,
     criterion: torch.nn.Module,
@@ -527,7 +529,8 @@ def train_one_epoch(
         data: PoseData
         # Inputs
         if args.aug_rotation:
-            assert not (args.use_joints_rest_prior_loss or args.use_pose_rest_prior_loss)
+            assert not (args.predict_joints and args.use_joints_rest_prior_loss)
+            assert not (args.predict_pose_trans and args.use_pose_rest_prior_loss)
             rotate = Rotate(R=random_rotations(len(data)))
         else:
             rotate = Transform3d(matrix=data.hips_transform.transpose(-1, -2))
@@ -562,7 +565,7 @@ def train_one_epoch(
         # import trimesh; trimesh.Scene([trimesh.PointCloud(verts[-1].cpu().numpy()), trimesh.PointCloud(gt.joints[-1].nan_to_num().cpu().numpy()), trimesh.PointCloud(gt.joints_tail[-1].nan_to_num().cpu().numpy())]).export("test.glb")
 
         # Forward
-        with torch.amp.autocast("cuda", enabled=False):
+        with torch.amp.autocast("cuda", enabled=args.ae_type == "hy3d2.1"):
             model.train()
             joints_gt = pose_gt = None
             if (
@@ -602,6 +605,12 @@ def train_one_epoch(
 
         # optimizer.zero_grad()
         # loss.backward()
+        # for name, param in model.named_parameters():
+        #     if param.requires_grad and not torch.isfinite(param).all():
+        #         print(f"Parameter {name} is not finite, fixing it")
+        #         param.requires_grad = False
+        #         param.nan_to_num_(nan=0.0)
+        #         param.requires_grad = True
         # optimizer.step()
         loss /= accum_iter
         loss_scaler(
@@ -613,18 +622,12 @@ def train_one_epoch(
             update_grad=(data_iter_step + 1) % accum_iter == 0,
             named_parameters=model.named_parameters(),
         )
-        if (data_iter_step + 1) % accum_iter == 0:
-            optimizer.zero_grad()
-        for name, param in model.named_parameters():
-            if param.requires_grad and not torch.isfinite(param).all():
-                print(f"Parameter {name} is not finite, fixing it")
-                param.requires_grad = False
-                param.nan_to_num_(nan=0.0)
-                param.requires_grad = True
         # # print unused params
         # for name, param in model.named_parameters():
         #     if param.requires_grad and param.grad is None:
         #         print(name)
+        if (data_iter_step + 1) % accum_iter == 0:
+            optimizer.zero_grad()
 
         if discriminator:
             model_D, optimizer_D = get_discriminator()  # here model_D still has grad (from g_loss)
@@ -707,6 +710,7 @@ def train_one_epoch(
 
 
 @torch.no_grad()
+@robust_dataloader
 def evaluate(data_loader: DataLoader, model: PCAE, device: torch.device, args):
     criterion = torch.nn.MSELoss()
     metric_logger = misc.MetricLogger(delimiter=" | ")
@@ -733,7 +737,7 @@ def evaluate(data_loader: DataLoader, model: PCAE, device: torch.device, args):
         else:
             verts = None
         gt = GT(data, global_transform, global_transform_rest, device)
-        with torch.amp.autocast("cuda", enabled=False):
+        with torch.amp.autocast("cuda", enabled=args.ae_type == "hy3d2.1"):
             output = model(
                 pts,
                 verts,

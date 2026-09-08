@@ -1,10 +1,14 @@
 import argparse
+import gc
 import os
+import signal
 import sys
+import warnings
+from contextlib import suppress
 from datetime import datetime
-from functools import wraps
+from functools import partial, wraps
 from time import perf_counter
-from typing import Callable, TypeVar
+from typing import Callable, ParamSpec, TypeVar
 
 import numpy as np
 import torch
@@ -110,6 +114,155 @@ class Timing:
         return wrapped_function
 
 
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def robust_dataloader(func: Callable[P, R]) -> Callable[P, R]:
+    """
+    A generic decorator that seamlessly intercepts DataLoader and injects breakpoint resume capability,
+    defending against OS-level crashes (e.g., bpy Segmentation fault) during multiprocessing.
+    """
+
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+
+        class _CachedSampler:
+            """A dummy sampler that yields from a pre-cached sequence."""
+
+            def __init__(self, sequence):
+                self.sequence = sequence
+
+            def __iter__(self):
+                return iter(self.sequence)
+
+            def __len__(self):
+                return len(self.sequence)
+
+        class RobustWrapper:
+            def __init__(self, original_dl: torch.utils.data.DataLoader):
+                self.original_dl = original_dl
+                self.dataset = original_dl.dataset
+                self.target_length = len(original_dl)
+                self.epoch_sequence = None
+
+            def __len__(self):
+                return self.target_length
+
+            def _create_loader(self, skip_batches: int):
+                dl_kwargs = {"dataset": self.dataset}
+
+                if self.original_dl.batch_sampler is not None:
+                    if self.epoch_sequence is None:
+                        self.epoch_sequence = list(self.original_dl.batch_sampler)
+                    remaining = self.epoch_sequence[skip_batches:]
+                    if not remaining:
+                        return None
+                    dl_kwargs["batch_sampler"] = _CachedSampler(remaining)
+                else:
+                    if self.epoch_sequence is None:
+                        self.epoch_sequence = list(self.original_dl.sampler)
+                    remaining = self.epoch_sequence[skip_batches:]
+                    if not remaining:
+                        return None
+                    dl_kwargs["sampler"] = _CachedSampler(remaining)
+                    dl_kwargs["batch_size"] = None
+
+                # Inherit valid properties from the original dataloader
+                valid_keys = [
+                    "num_workers",
+                    "collate_fn",
+                    "pin_memory",
+                    "timeout",
+                    "worker_init_fn",
+                    "multiprocessing_context",
+                    "generator",
+                    "persistent_workers",
+                    "pin_memory_device",
+                ]
+                for key in valid_keys:
+                    if hasattr(self.original_dl, key):
+                        dl_kwargs[key] = getattr(self.original_dl, key)
+
+                if dl_kwargs.get("num_workers", 0) > 0 and hasattr(self.original_dl, "prefetch_factor"):
+                    dl_kwargs["prefetch_factor"] = self.original_dl.prefetch_factor
+
+                return torch.utils.data.DataLoader(**dl_kwargs)
+
+            def __iter__(self):
+                yielded_batches = 0
+                current_dl = self._create_loader(skip_batches=0)
+                if current_dl is None:
+                    return
+                current_iter = iter(current_dl)
+
+                # Disable PyTorch's asynchronous signal handling to prevent mid-execution interrupts
+                if hasattr(signal, "SIGCHLD"):
+                    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+
+                while yielded_batches < self.target_length:
+                    try:
+                        batch = next(current_iter)
+                        yield batch
+                        yielded_batches += 1
+                    except StopIteration:
+                        break
+                    except RuntimeError as e:
+                        error_msg = str(e).lower()
+                        crash_keywords = [
+                            "segmentation fault",
+                            "killed by signal",
+                            "exited unexpectedly",
+                        ]
+
+                        if any(kw in error_msg for kw in crash_keywords):
+                            warnings.warn(
+                                f"Intercepted OS-level worker crash at batch {yielded_batches}/{self.target_length}. "
+                                f"Cleaning up memory and seamlessly restarting dataloader...",
+                            )
+
+                            # Safely terminate the background pin_memory_thread to prevent memory/FD leaks
+                            if hasattr(current_iter, "_pin_memory_thread_done_event"):
+                                current_iter._pin_memory_thread_done_event.set()
+                            if hasattr(current_iter, "_worker_result_queue"):
+                                with suppress(Exception):
+                                    current_iter._worker_result_queue.put((None, None))
+                                current_iter._worker_result_queue.cancel_join_thread()
+                            # Prevent deadlock in pin_memory_thread.join() during cleanup
+                            if hasattr(current_iter, "_pin_memory_thread"):
+                                del current_iter._pin_memory_thread
+                            # if hasattr(current_iter, "_shutdown"):
+                            #     current_iter._shutdown = True
+
+                            del current_iter
+                            del current_dl
+                            gc.collect()
+
+                            current_dl = self._create_loader(skip_batches=yielded_batches)
+                            if current_dl is None:
+                                break
+                            current_iter = iter(current_dl)
+
+                            if hasattr(signal, "SIGCHLD"):
+                                signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+                        else:
+                            raise e
+
+        # Intercept and wrap DataLoader arguments
+        new_args = list(args)
+        for i, arg in enumerate(new_args):
+            if isinstance(arg, torch.utils.data.DataLoader):
+                new_args[i] = RobustWrapper(arg)
+
+        for k, v in kwargs.items():
+            if isinstance(v, torch.utils.data.DataLoader):
+                kwargs[k] = RobustWrapper(v)
+
+        return func(*new_args, **kwargs)
+
+    return wrapper
+
+
 def fix_random(seed=0):
     import random
 
@@ -152,8 +305,6 @@ def _str2list(v: str, element_type=None) -> list:
 
 
 def str2list(type=None):
-    from functools import partial
-
     return partial(_str2list, element_type=type)
 
 
