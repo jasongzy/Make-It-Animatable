@@ -4,3 +4,6 @@
 [submodule "util/3dgs-render-blender-addon"]
 	path = util/3dgs-render-blender-addon
 	url = https://github.com/Kiri-Innovation/3dgs-render-blender-addon
+[submodule "util/Hunyuan3D_21"]
+	path = util/Hunyuan3D_21
+	url = https://github.com/jasongzy/Hunyuan3D-2.1

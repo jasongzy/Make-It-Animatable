@@ -67,7 +67,7 @@ class JointsEmbedder(nn.Module):
         self.embedding_dim = self.point_num * (embed_dim + (3 if concat_input else 0))
         self.out_mlp = out_mlp
         if self.out_mlp:
-            self.mlp = nn.Linear(self.embedding_dim, out_dim)
+            self.mlp = nn.Sequential(nn.Linear(self.embedding_dim, out_dim), nn.GELU(), nn.Linear(out_dim, out_dim))
 
     def forward(self, joints: torch.Tensor):
         """
@@ -89,15 +89,17 @@ class TransformMLP(nn.Module):
         self.rotation_dim = rotation_dim
         self.scaling_dim = scaling_dim
         if self.transl_dim > 0:
-            self.transl_mlp = nn.Linear(in_dim, transl_dim)
+            self.transl_mlp = nn.Sequential(nn.Linear(in_dim, in_dim), nn.GELU(), nn.Linear(in_dim, transl_dim))
         if self.rotation_dim > 0:
             if self.rotation_dim == 4:  # quaternions
-                self.rotation_mlp_scalar = nn.Linear(in_dim, 1)
-                self.rotation_mlp_vector = nn.Linear(in_dim, rotation_dim - 1)
+                self.rotation_mlp_scalar = nn.Sequential(nn.Linear(in_dim, in_dim), nn.GELU(), nn.Linear(in_dim, 1))
+                self.rotation_mlp_vector = nn.Sequential(
+                    nn.Linear(in_dim, in_dim), nn.GELU(), nn.Linear(in_dim, rotation_dim - 1)
+                )
             else:
-                self.rotation_mlp = nn.Linear(in_dim, rotation_dim)
+                self.rotation_mlp = nn.Sequential(nn.Linear(in_dim, in_dim), nn.GELU(), nn.Linear(in_dim, rotation_dim))
         if self.scaling_dim > 0:
-            self.scaling_mlp = nn.Linear(in_dim, scaling_dim)
+            self.scaling_mlp = nn.Sequential(nn.Linear(in_dim, in_dim), nn.GELU(), nn.Linear(in_dim, scaling_dim))
 
     def forward(self, feat: torch.Tensor):
         """
@@ -226,6 +228,7 @@ class InputAttention(nn.Module):
 class PCAE(nn.Module):
     def __init__(
         self,
+        ae_type="vecset",
         N=2048,
         input_normal=False,
         input_attention=False,
@@ -260,30 +263,75 @@ class PCAE(nn.Module):
     ):
         super().__init__()
 
+        self.ae_type = ae_type
         self.N = N
-        self.base = create_autoencoder(dim=512, M=num_latents, N=self.N, latent_dim=8, deterministic=deterministic)
-        self.embed_dim = self.base.point_embed.mlp.out_features
-        self.feat_dim = self.base.decoder_cross_attn.fn.to_out.out_features
-
-        self.input_dims = [3]
-        self.input_normal = input_normal
-        if self.input_normal:
-            self.input_dims.append(3)
-            self.normal_embed = JointsEmbedder(out_dim=self.embed_dim)
-            nn.init.zeros_(self.normal_embed.mlp.weight)
-            nn.init.zeros_(self.normal_embed.mlp.bias)
-        else:
-            self.input_dims.append(0)
-        self.input_dim = sum(self.input_dims)
-        if self.input_dim == self.input_dims[0]:
-            self.input_attention = False
-        else:
-            self.input_attention = input_attention
-        if self.input_attention:
-            self.input_attn = InputAttention(self.embed_dim)
-
         self.hierarchical_ratio = float(hierarchical_ratio)
         assert 0 <= hierarchical_ratio < 1.0, f"{hierarchical_ratio=} must be in [0, 1)"
+
+        if self.ae_type == "vecset":
+            self.base = create_autoencoder(dim=512, M=num_latents, N=self.N, latent_dim=8, deterministic=deterministic)
+            self.embed_dim = self.base.point_embed.mlp.out_features
+            self.feat_dim = self.base.decoder_cross_attn.fn.to_out.out_features
+
+            self.input_dims = [3]
+            self.input_normal = input_normal
+            if self.input_normal:
+                self.input_dims.append(3)
+                self.normal_embed = JointsEmbedder(out_dim=self.embed_dim)
+                nn.init.zeros_(self.normal_embed.mlp[-1].weight)
+                nn.init.zeros_(self.normal_embed.mlp[-1].bias)
+            else:
+                self.input_dims.append(0)
+            self.input_dim = sum(self.input_dims)
+            if self.input_dim == self.input_dims[0]:
+                self.input_attention = False
+            else:
+                self.input_attention = input_attention
+            if self.input_attention:
+                self.input_attn = InputAttention(self.embed_dim)
+
+        elif self.ae_type == "hy3d2.1":
+            warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
+            import logging
+
+            from util.Hunyuan3D_21.hy3dshape.hy3dshape.models.autoencoders import ShapeVAE
+
+            logging.getLogger("hy3dgen.shapgen").setLevel(logging.WARNING)
+
+            pc_sharpedge_size = int(self.N * self.hierarchical_ratio)
+            pc_size = self.N - pc_sharpedge_size
+            self.base = ShapeVAE.from_pretrained(
+                "tencent/Hunyuan3D-2.1",
+                device="cpu",
+                # dtype=torch.float32,
+                use_safetensors=False,
+                variant="fp16",
+                pc_size=pc_size,
+                pc_sharpedge_size=pc_sharpedge_size,
+                downsample_ratio=self.N // 4096,
+            )
+            self.embed_dim = 1024
+            self.feat_dim = 1024
+            self.num_latents = 4096
+            self.input_normal = input_normal
+            assert self.input_normal
+            self.input_dims = [3, 3]
+            self.input_dim = 6
+
+            old_query_proj = self.base.geo_decoder.query_proj
+            new_query_proj = nn.Linear(self.base.geo_decoder.fourier_embedder.out_dim + 3, old_query_proj.out_features)
+            with torch.no_grad():
+                new_query_proj.weight[:, :-3] = old_query_proj.weight
+                nn.init.zeros_(new_query_proj.weight[:, -3:])
+                new_query_proj.bias = old_query_proj.bias
+            self.base.geo_decoder.query_proj = new_query_proj
+
+            self.base.geo_decoder.output_proj = nn.Linear(
+                self.base.geo_decoder.output_proj.in_features, self.base.geo_decoder.output_proj.in_features
+            )
+
+        else:
+            raise NotImplementedError(f"{self.ae_type=}")
 
         self.output_dim = output_dim
         assert len(sharing_embed) != 1, "len(sharing_embed) must be 0 or > 1"
@@ -297,6 +345,10 @@ class PCAE(nn.Module):
             if self.bw_dot:
                 self.bw_embed = self.get_embed("bw")
                 self.bw_cross_attn = CrossAttention(self.feat_dim, dim_head=self.feat_dim, heads=1)
+                self.bw_proj_queries = nn.Sequential(
+                    nn.LayerNorm(self.feat_dim), nn.Linear(self.feat_dim, self.feat_dim)
+                )
+                self.bw_proj_bones = nn.Sequential(nn.LayerNorm(self.feat_dim), nn.Linear(self.feat_dim, self.feat_dim))
             else:
                 self.bw_head = nn.Linear(self.feat_dim, self.output_dim)
             self.bw_input_joints = bw_input_joints
@@ -327,7 +379,7 @@ class PCAE(nn.Module):
             assert not (joints_attn and joints_attn_causal), "Conflict arguments: joints_attn & joints_attn_causal"
             assert not (
                 not joints_attn_causal and joints_attn_causal_discrete
-            ), "Conflict arguments: !joints_attn & joints_attn_causal_discrete"
+            ), "Conflict arguments: !joints_attn_causal & joints_attn_causal_discrete"
             self.joints_attn_causal = joints_attn_causal
             self.joints_attn_causal_discrete = joints_attn_causal_discrete
             if self.joints_attn_causal and self.joints_attn_causal_discrete:
@@ -396,7 +448,7 @@ class PCAE(nn.Module):
             assert not (pose_attn and pose_attn_causal), "Conflict arguments: pose_attn & pose_attn_causal"
             assert not (
                 not pose_attn_causal and pose_attn_causal_discrete
-            ), "Conflict arguments: !pose_attn & pose_attn_causal_discrete"
+            ), "Conflict arguments: !pose_attn_causal & pose_attn_causal_discrete"
             assert not (
                 self.pose_input_joints and pose_attn_causal_discrete
             ), "Conflict arguments: pose_input_joints & pose_attn_causal_discrete"
@@ -513,23 +565,35 @@ class PCAE(nn.Module):
         return self
 
     def load_base(self, pth_path: str):
-        self.base.load_state_dict(torch.load(pth_path, map_location="cpu")["model"], strict=True)
-        print(f"Loaded base model from {pth_path}")
+        if self.ae_type == "vecset":
+            self.base.load_state_dict(torch.load(pth_path, map_location="cpu")["model"], strict=True)
+            print(f"Loaded base model from {pth_path}")
         return self
 
     def freeze_base(self):
         for param in self.base.parameters():
             param.requires_grad = False
-        tune_module_list = []
+        tune_module_list: list[nn.Module] = []
         if self.tune_decoder_self_attn:
-            tune_module_list.append(self.base.layers)
+            if self.ae_type == "vecset":
+                tune_module_list.append(self.base.layers)
+            elif self.ae_type == "hy3d2.1":
+                tune_module_list.append(self.base.transformer)
         if self.tune_decoder_cross_attn:
-            tune_module_list.append(self.base.decoder_cross_attn)
-            if self.base.decoder_ff is not None:
-                tune_module_list.append(self.base.decoder_ff)
+            if self.ae_type == "vecset":
+                tune_module_list.append(self.base.decoder_cross_attn)
+                if self.base.decoder_ff is not None:
+                    tune_module_list.append(self.base.decoder_ff)
+            elif self.ae_type == "hy3d2.1":
+                tune_module_list.append(self.base.geo_decoder)
         for module in tune_module_list:
+            if self.ae_type == "hy3d2.1":
+                module.to(dtype=torch.float32)
             for param in module.parameters():
                 param.requires_grad = True
+            if self.ae_type == "hy3d2.1" and not self.predict_bw:
+                for param in self.base.geo_decoder.query_proj.parameters():
+                    param.requires_grad = False
         return self
 
     def fps(self, pc: torch.Tensor) -> torch.Tensor:
@@ -612,20 +676,25 @@ class PCAE(nn.Module):
         Returns:
             [B, 512, 512]
         """
-        # _, x = self.base.encode(pc)
+        if self.ae_type == "vecset":
+            # _, x = self.base.encode(pc)
 
-        sampled_pc = self.fps(pc)
-        sampled_pc_embeddings = self.embed(sampled_pc)
-        pc_embeddings = self.embed(pc)
-        cross_attn, cross_ff = self.base.cross_attend_blocks
-        x = cross_attn(sampled_pc_embeddings, context=pc_embeddings, mask=None) + sampled_pc_embeddings
-        x = cross_ff(x) + x
+            sampled_pc = self.fps(pc)
+            sampled_pc_embeddings = self.embed(sampled_pc)
+            pc_embeddings = self.embed(pc)
+            cross_attn, cross_ff = self.base.cross_attend_blocks
+            x = cross_attn(sampled_pc_embeddings, context=pc_embeddings, mask=None) + sampled_pc_embeddings
+            x = cross_ff(x) + x
 
-        if hasattr(self.base, "mean_fc"):
-            mean = self.base.mean_fc(x)
-            logvar = self.base.logvar_fc(x)
-            posterior = DiagonalGaussianDistribution(mean, logvar)
-            x = posterior.sample()
+            if hasattr(self.base, "mean_fc"):
+                mean = self.base.mean_fc(x)
+                logvar = self.base.logvar_fc(x)
+                posterior = DiagonalGaussianDistribution(mean, logvar)
+                x = posterior.sample()
+
+        elif self.ae_type == "hy3d2.1":
+            pc = torch.cat([pc, torch.zeros_like(pc[..., :1])], dim=-1)
+            x, fps_idx = self.base.encode(pc, fps_idx=None, sample_posterior=True)
 
         return x
 
@@ -637,20 +706,35 @@ class PCAE(nn.Module):
         Returns:
             [B, N, 512]
         """
-        # o = self.base.decode(x, queries)
-        if hasattr(self.base, "proj"):
-            x = self.base.proj(x)
-        for self_attn, self_ff in self.base.layers:
-            x = self_attn(x) + x
-            x = self_ff(x) + x
-        # cross attend from decoder queries to latents
-        queries_embeddings = self.embed(queries)
-        if learnable_embeddings is not None:
-            queries_embeddings = torch.cat((queries_embeddings, learnable_embeddings), dim=1)
-        latents = self.base.decoder_cross_attn(queries_embeddings, context=x)
-        # optional decoder feedforward
-        if self.base.decoder_ff is not None:
-            latents = latents + self.base.decoder_ff(latents)
+        if self.ae_type == "vecset":
+            # o = self.base.decode(x, queries)
+            if hasattr(self.base, "proj"):
+                x = self.base.proj(x)
+            for self_attn, self_ff in self.base.layers:
+                x = self_attn(x) + x
+                x = self_ff(x) + x
+            # cross attend from decoder queries to latents
+            queries_embeddings = self.embed(queries)
+            if learnable_embeddings is not None:
+                queries_embeddings = torch.cat((queries_embeddings, learnable_embeddings), dim=1)
+            latents = self.base.decoder_cross_attn(queries_embeddings, context=x)
+            # optional decoder feedforward
+            if self.base.decoder_ff is not None:
+                latents = latents + self.base.decoder_ff(latents)
+
+        elif self.ae_type == "hy3d2.1":
+            x = self.base.decode(x)
+            if queries.shape[-2] > 0:
+                queries, normals = queries.split(self.input_dims, dim=-1)
+                geo_decoder = self.base.geo_decoder
+                queries_embeddings = geo_decoder.fourier_embedder(queries).to(x.dtype)
+                queries_embeddings = geo_decoder.query_proj(torch.cat([queries_embeddings, normals], dim=-1))
+                if learnable_embeddings is not None:
+                    queries_embeddings = torch.cat((queries_embeddings, learnable_embeddings), dim=1)
+            else:
+                queries_embeddings = learnable_embeddings
+            latents = self.base.geo_decoder(query_embeddings=queries_embeddings, latents=x)
+
         return latents
 
     def forward_base(self, pc: torch.Tensor, queries: torch.Tensor) -> torch.Tensor:
@@ -695,7 +779,7 @@ class PCAE(nn.Module):
         else:
             learnable_embeddings = None
         if queries is None:
-            assert not self.predict_bw and learnable_embeddings is not None, "Nothing to predict"
+            assert learnable_embeddings is not None, "Nothing to predict"
             queries = torch.empty_like(pc[:, :0])  # placeholder
         elif queries.shape[-1] > self.input_dim:
             queries = queries[..., : self.input_dim]
@@ -720,6 +804,8 @@ class PCAE(nn.Module):
         if self.predict_bw:
             if self.bw_dot:
                 logits, logits_bw = self.bw_cross_attn((logits, logits_bw), context=logits_bw)
+                logits = self.bw_proj_queries(logits)
+                logits_bw = self.bw_proj_bones(logits_bw)
                 bw = torch.einsum("bnd,bkd->bnk", logits, logits_bw)
             else:
                 bw: torch.Tensor = self.bw_head(logits)
@@ -959,12 +1045,12 @@ class JointsAttentionCausal(nn.Module):
         self.out_dim = out_dim
         if self.out_type == "joints":
             self.encoder = JointsEmbedder(include_tail=include_joints_tail, out_dim=feat_dim)
-            self.decoder = nn.Linear(feat_dim, self.out_dim)
+            self.decoder = nn.Sequential(nn.Linear(feat_dim, feat_dim), nn.GELU(), nn.Linear(feat_dim, self.out_dim))
         elif self.out_type == "pose":
-            self.encoder = nn.Linear(self.out_dim, feat_dim)
+            self.encoder = nn.Sequential(nn.Linear(self.out_dim, feat_dim), nn.GELU(), nn.Linear(feat_dim, feat_dim))
             if zero_init:
-                nn.init.zeros_(self.encoder.weight)
-                nn.init.zeros_(self.encoder.bias)
+                nn.init.zeros_(self.encoder[-1].weight)
+                nn.init.zeros_(self.encoder[-1].bias)
             self.decoder = TransformMLP(
                 feat_dim, transl_dim=self.out_dim - rotation_dim, rotation_dim=rotation_dim, scaling_dim=0
             )
@@ -1044,7 +1130,7 @@ class JointsAttentionCausal(nn.Module):
                 if not any(mask):
                     continue
                 out_ = self._forward(feat, out)
-                out[mask.expand(B, -1)] = out_[mask.expand(B, -1)]
+                out[mask.expand(B, -1)] = out_[mask.expand(B, -1)].to(out.dtype)
         # assert out.isfinite().all()
         return out
 
