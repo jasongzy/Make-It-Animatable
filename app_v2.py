@@ -2,8 +2,10 @@ import spaces  # isort:skip
 import contextlib
 import gc
 import os
+import queue
 import sys
 import tempfile
+import threading
 import time
 import warnings
 from dataclasses import dataclass
@@ -99,6 +101,9 @@ gradio.helpers.log_message = _log_message
 
 
 cmap = matplotlib.colormaps.get_cmap("plasma")
+
+# Task queue for blender tasks to be executed in the main thread
+blender_task_queue = queue.Queue()
 
 
 @dataclass()
@@ -1054,51 +1059,38 @@ def vis_blender(
             )
 
     print("Exporting to Blender...")
-    if is_main_thread():
-        from argparse import Namespace
+    from argparse import Namespace
 
+    namespace_args = Namespace(
+        input_path=data,
+        output_path=db.anim_path,
+        template_path=template_path,
+        keep_raw=restore_global,
+        rest_path=db.rest_vis_path if db.is_mesh else None,
+        pose_local=False,
+        reset_to_rest=reset_to_rest,
+        remove_fingers=remove_fingers,
+        animation_path=animation_file,
+        retarget=retarget,
+        inplace=inplace,
+    )
+
+    if is_main_thread():
         from app_blender import main
 
-        main(
-            Namespace(
-                input_path=data,
-                output_path=db.anim_path,
-                template_path=template_path,
-                keep_raw=restore_global,
-                rest_path=db.rest_vis_path if db.is_mesh else None,
-                pose_local=False,
-                reset_to_rest=reset_to_rest,
-                remove_fingers=remove_fingers,
-                animation_path=animation_file,
-                retarget=retarget,
-                inplace=inplace,
-            )
-        )
+        main(namespace_args)
     else:
-        # Directly call bpy here causes crash, because Blender does not support modifying data in child threads
-        with tempfile.NamedTemporaryFile(suffix=".npz") as f:
-            np.savez(f.name, **data)
-            cmd = f"python app_blender.py --input_path '{f.name}' --output_path '{os.path.abspath(db.anim_path)}'"
-            cmd += f" --template_path '{os.path.abspath(template_path)}'"
-            if restore_global:
-                cmd += " --keep_raw"
-            if db.is_mesh:
-                cmd += f" --rest_path '{os.path.abspath(db.rest_vis_path)}'"
-            # if "local" in model_pose.pose_mode:
-            #     cmd += " --pose_local"
-            if reset_to_rest:
-                cmd += " --reset_to_rest"
-            if remove_fingers:
-                cmd += " --remove_fingers"
-            if animation_file is not None:
-                cmd += f" --animation_path '{os.path.abspath(animation_file)}'"
-                if retarget:
-                    cmd += " --retarget"
-                if inplace:
-                    cmd += " --inplace"
-            cmd += " > /dev/null 2>&1"
-            # print(cmd)
-            os.system(cmd)
+        # Pass the task to the main thread through queue instead of starting a subprocess
+        event = threading.Event()
+        result_box = []
+        blender_task_queue.put((namespace_args, event, result_box))
+
+        # Wait until the main thread finishes executing the blender task
+        event.wait()
+
+        # If an exception happened during main thread execution, raise it here
+        if len(result_box) > 0 and isinstance(result_box[0], Exception):
+            raise gr.Error(f"Blender failed: {str(result_box[0])}")
 
     print(f"Output animatable model: '{db.anim_path}'")
 
@@ -1150,7 +1142,7 @@ def _pipeline(
     input_normal=True,
     bw_fix=True,
     bw_vis_bone="LeftArm",
-    restore_global=True,
+    restore_global=False,
     reset_to_rest=False,
     animation_file: str = None,
     retarget=True,
@@ -1334,8 +1326,8 @@ def init_blocks():
                             )
                             input_restore_global = gr.Checkbox(
                                 label="Restore Global Transform",
-                                info="Restore all the output assets to the initial input coordinates (otherwise will be normalized).",
-                                value=True,
+                                info="Restore all the output assets to the initial input coordinates (otherwise will be normalized). May affect the results of animation retargeting.",
+                                value=False,
                                 interactive=True,
                             )
 
@@ -1655,5 +1647,37 @@ if __name__ == "__main__":
     #         pass
 
     demo.launch(
-        server_name="0.0.0.0", server_port=7860, allowed_paths=[".", ".."], show_error=True, ssr_mode=False, share=True
+        server_name="0.0.0.0",
+        server_port=7860,
+        allowed_paths=list(map(os.path.abspath, [".", ".."])),
+        show_error=True,
+        ssr_mode=False,
+        share=True,
+        prevent_thread_lock=True,
     )
+
+    # Enter the main thread consumer loop to execute Blender rendering tasks
+    import app_blender
+
+    print("Main thread entering Blender task event loop...")
+    while True:
+        try:
+            # Block until there's a task.
+            task = blender_task_queue.get()
+            if task is None:
+                continue
+            args, event, result_box = task
+
+            try:
+                app_blender.main(args)
+            except Exception as e:
+                import traceback
+
+                traceback.print_exc()
+                result_box.append(e)
+
+            # Unblock the Gradio thread
+            event.set()
+        except KeyboardInterrupt:
+            print("Interrupted by user. Exiting task loop...")
+            break
