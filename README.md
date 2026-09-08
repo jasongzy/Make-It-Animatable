@@ -17,6 +17,14 @@ Houqiang Li,
 
 </div>
 
+## 🎉 News
+
+- **MIA v2**
+  - Upgraded to the Hunyuan3D 2.1 ShapeVAE backbone with retrained MIA models—larger capacity and better predictions! (only mesh inputs are supported).
+  - Updated the architectures for joint, skinning-weight, and pose prediction, as long as the training pipeline.
+  - Refined the demo app workflow—better skinning-weight post-processing, Blender integration, and global-transform restoration!
+  - Try the [MIA v2 demo](https://huggingface.co/spaces/jasongzy/Make-It-Animatable-v2), or run it locally with `python app_v2.py`!
+
 ## Installation
 
 ```bash
@@ -44,7 +52,7 @@ Download the pretrained models:
 
 ```bash
 hf download jasongzy/Make-It-Animatable \
-  --include 'output/best/new/**' \
+  --include 'output/best/new/**' 'output/best/v2/**' \
   --local-dir .
 ```
 
