@@ -1,5 +1,6 @@
 import spaces  # isort:skip
 import contextlib
+import csv
 import gc
 import os
 import queue
@@ -1256,6 +1257,10 @@ def init_blocks():
         gr.set_static_paths(paths=[examples_dir])
     except AttributeError:
         pass
+    with open(os.path.join(examples_dir, "log.csv"), newline="") as f:
+        examples_data = list(csv.reader(f))[1:]
+    for example in examples_data:
+        example[0] = os.path.join(examples_dir, example[0])
     title = "Make-It-Animatable"
     description = f"""
     <center>
@@ -1402,7 +1407,7 @@ def init_blocks():
 
                 with gr.Row(variant="panel"):
                     examples = gr.Examples(
-                        examples=examples_dir,
+                        examples=examples_data,
                         inputs=[input_3d, input_is_gs, input_no_fingers, input_rest_pose, input_rest_parts],
                         label="Examples",
                         cache_examples=False,
