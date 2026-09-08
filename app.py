@@ -1542,9 +1542,6 @@ def init_blocks():
 
             # Events
 
-            def clear_components(inputs: dict):
-                return [None] * len(inputs)
-
             input_3d.upload(fn=ply2visible, inputs=[input_3d, input_is_gs], outputs=input_3d)
             input_is_gs.change(fn=ply2visible, inputs=[input_3d, input_is_gs], outputs=input_3d)
             input_is_gs.change(
@@ -1581,13 +1578,12 @@ def init_blocks():
                 # gr.Success("Finished successfully!")
 
             submit_event = submit_btn.click(
-                fn=clear_components, inputs=set(outputs), outputs=outputs, show_progress="hidden"
+                fn=lambda: [None] * len(outputs), outputs=outputs, show_progress="hidden"
             ).success(
                 fn=pipeline, inputs=set(inputs + (state,)), outputs=set(outputs + (state,)), show_progress="minimal"
             )
             animate_event = animate_btn.click(
-                fn=clear_components,
-                inputs={output_rest_vis, output_anim, output_anim_vis},
+                fn=lambda: [None] * 3,
                 outputs=[output_rest_vis, output_anim, output_anim_vis],
             ).success(
                 fn=vis_blender,
@@ -1607,7 +1603,7 @@ def init_blocks():
             stop_btn.click(fn=lambda: [], cancels=[submit_event, animate_event]).success(
                 fn=lambda: gr.Warning("Job cancelled") or []
             )
-            clear_btn.click(fn=clear_components, inputs=set(outputs), outputs=outputs).success(
+            clear_btn.click(fn=lambda: [None] * len(outputs), outputs=outputs).success(
                 fn=clear, inputs=state, outputs=state
             )
 
