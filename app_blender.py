@@ -41,10 +41,11 @@ def main(args: argparse.Namespace):
     mesh = data["mesh"]
     if isinstance(mesh, np.ndarray):
         mesh: trimesh.Trimesh = mesh.item()
+    mesh = mesh.copy()
     gs = data["gs"]
     joints = data["joints"]
     joints_tail = data["joints_tail"]
-    bw = data["bw"]
+    bw = data["bw"].copy()
     pose = data["pose"]
     bones_idx_dict = data["bones_idx_dict"]
     if isinstance(bones_idx_dict, np.ndarray):
