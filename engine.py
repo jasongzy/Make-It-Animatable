@@ -317,27 +317,39 @@ def get_loss(output: Output, gt: GT, criterion: torch.nn.Module, args):
 
     if args.predict_joints:
         joints_gt = gt.joints_dual if args.predict_joints_tail else gt.joints
-        loss_joints = criterion(joints[gt.joints_mask], joints_gt[gt.joints_mask])
-        loss += 1e-1 * loss_joints
-        loss_value_dict["loss/joints"] = loss_joints.item()
-        if args.predict_joints_tail and args.use_joints_connect_loss:
-            loss_joints_connect = connect_loss_fn(joints)
-            loss += 1e-1 * loss_joints_connect
-            loss_value_dict["loss/joints_connect"] = loss_joints_connect.item()
-        if args.use_joints_rest_loss or args.use_rest_prior_loss:
-            rest_joints = apply_transform(joints[..., :3], gt.pose_p2r.nan_to_num(nan=0.0))
-            if args.use_joints_rest_loss:
-                # https://github.com/pytorch/pytorch/issues/15506
-                # Torch will produce NaN gradients if any element of the involved tensor is NaN,
-                # even if those NaNs are not accessed (e.g. being masked) in loss computation.
-                # So we have to replace NaNs with zeros.
-                loss_joints_rest = criterion(rest_joints[gt.joints_mask], gt.rest_joints[gt.joints_mask])
-                loss += 1e-1 * loss_joints_rest
-                loss_value_dict["loss/joints_rest"] = loss_joints_rest.item()
-            if args.use_rest_prior_loss:
-                loss_rest_prior = rest_prior_loss_fn(rest_joints)
-                loss += 1e-2 * loss_rest_prior
-                loss_value_dict["loss/joints_rest_prior"] = loss_rest_prior.item()
+        if joints.ndim == 3:
+            loss_joints = criterion(joints[gt.joints_mask], joints_gt[gt.joints_mask])
+            loss += 1e-1 * loss_joints
+            loss_value_dict["loss/joints"] = loss_joints.item()
+            if args.predict_joints_tail and args.use_joints_connect_loss:
+                loss_joints_connect = connect_loss_fn(joints)
+                loss += 1e-1 * loss_joints_connect
+                loss_value_dict["loss/joints_connect"] = loss_joints_connect.item()
+            if args.use_joints_rest_loss or args.use_joints_rest_prior_loss:
+                rest_joints = apply_transform(joints[..., :3], gt.pose_p2r.nan_to_num(nan=0.0))
+                if args.use_joints_rest_loss:
+                    # https://github.com/pytorch/pytorch/issues/15506
+                    # Torch will produce NaN gradients if any element of the involved tensor is NaN,
+                    # even if those NaNs are not accessed (e.g. being masked) in loss computation.
+                    # So we have to replace NaNs with zeros.
+                    loss_joints_rest = criterion(rest_joints[gt.joints_mask], gt.rest_joints[gt.joints_mask])
+                    loss += 1e-1 * loss_joints_rest
+                    loss_value_dict["loss/joints_rest"] = loss_joints_rest.item()
+                if args.use_joints_rest_prior_loss:
+                    loss_rest_prior = rest_prior_loss_fn(rest_joints)
+                    loss += 1e-2 * loss_rest_prior
+                    loss_value_dict["loss/joints_rest_prior"] = loss_rest_prior.item()
+        else:
+            assert args.joints_attn_causal_discrete
+            from model import tokenize
+
+            loss_fct = torch.nn.CrossEntropyLoss()
+            vocab_size = joints.shape[-1]
+            joints_logits = joints[gt.joints_mask]
+            labels = tokenize(joints_gt[gt.joints_mask], num_discrete=vocab_size)
+            loss_joints = loss_fct(joints_logits.view(-1, vocab_size), labels.view(-1))
+            loss += 1e-1 * loss_joints
+            loss_value_dict["loss/joints"] = loss_joints.item()
 
     if args.predict_global_trans:
         loss_global = criterion(global_trans, gt.global_inv)
@@ -345,111 +357,134 @@ def get_loss(output: Output, gt: GT, criterion: torch.nn.Module, args):
         loss_value_dict["loss/global"] = loss_global.item()
 
     if args.predict_pose_trans:
-        if "local" in args.pose_mode:
-            if args.pose_mode == "local_quat":
-                pose_gt = gt.pose_p2r_local_quat
-            elif args.pose_mode == "local_ortho6d":
-                pose_gt = gt.pose_p2r_local_matrix
-                pose_trans = to_pose_local(pose_trans, input_mode=args.pose_mode, return_quat=False)
-        elif args.pose_mode == "quat":
-            pose_gt = gt.pose_p2r_quat
-        elif args.pose_mode == "ortho6d":
-            pose_gt = gt.pose_p2r_rot
-            pose_trans = ortho6d_to_matrix(pose_trans)
-        elif args.pose_mode == "transl_quat":
-            pose_gt = gt.pose_p2r_transl_quat
-        elif args.pose_mode == "dual_quat":
-            pose_gt = gt.pose_p2r_dualquat
-        elif args.pose_mode == "transl_ortho6d":
-            pose_gt = gt.pose_p2r_transl_matrix
-            transl, rotation = torch.split(pose_trans, [3, 6], dim=-1)
-            rotation = ortho6d_to_matrix(rotation)
-            rotation = rotation.reshape(*rotation.shape[:-2], 3 * 3)
-            pose_trans = torch.cat([transl, rotation], dim=-1)
-        elif args.pose_mode == "target_quat":
-            pose_gt = gt.pose_p2r_target_quat
-        elif args.pose_mode == "target_ortho6d":
-            pose_gt = gt.pose_p2r_target_matrix
-            target, rotation = torch.split(pose_trans, [3, 6], dim=-1)
-            rotation = ortho6d_to_matrix(rotation)
-            rotation = rotation.reshape(*rotation.shape[:-2], 3 * 3)
-            pose_trans = torch.cat([target, rotation], dim=-1)
-        loss_pose = criterion(pose_trans[gt.joints_mask], pose_gt[gt.joints_mask])
-        loss += (1.0 if "local" in args.pose_mode or args.pose_mode in ("quat", "ortho6d") else 1e-1) * loss_pose
-        loss_value_dict["loss/pose"] = loss_pose.item()
-        if any((args.use_pose_rest_loss, args.use_rest_prior_loss, args.use_pose_connect_loss, args.use_pose_adv_loss)):
+        if pose_trans.ndim == 3:
             if "local" in args.pose_mode:
                 if args.pose_mode == "local_quat":
-                    pose_trans_ = quat_to_matrix(pose_trans)
+                    pose_gt = gt.pose_p2r_local_quat
+                elif args.pose_mode == "local_ortho6d":
+                    pose_gt = gt.pose_p2r_local_matrix
+                    pose_trans = to_pose_local(pose_trans, input_mode=args.pose_mode, return_quat=False)
+            elif args.pose_mode == "quat":
+                pose_gt = gt.pose_p2r_quat
+            elif args.pose_mode == "ortho6d":
+                pose_gt = gt.pose_p2r_rot
+                pose_trans = ortho6d_to_matrix(pose_trans)
+            elif args.pose_mode == "transl_quat":
+                pose_gt = gt.pose_p2r_transl_quat
+            elif args.pose_mode == "dual_quat":
+                pose_gt = gt.pose_p2r_dualquat
+            elif args.pose_mode == "transl_ortho6d":
+                pose_gt = gt.pose_p2r_transl_matrix
+                transl, rotation = torch.split(pose_trans, [3, 6], dim=-1)
+                rotation = ortho6d_to_matrix(rotation)
+                rotation = rotation.reshape(*rotation.shape[:-2], 3 * 3)
+                pose_trans = torch.cat([transl, rotation], dim=-1)
+            elif args.pose_mode == "target_quat":
+                pose_gt = gt.pose_p2r_target_quat
+            elif args.pose_mode == "target_ortho6d":
+                pose_gt = gt.pose_p2r_target_matrix
+                target, rotation = torch.split(pose_trans, [3, 6], dim=-1)
+                rotation = ortho6d_to_matrix(rotation)
+                rotation = rotation.reshape(*rotation.shape[:-2], 3 * 3)
+                pose_trans = torch.cat([target, rotation], dim=-1)
+            loss_pose = criterion(pose_trans[gt.joints_mask], pose_gt[gt.joints_mask])
+            loss += (1.0 if "local" in args.pose_mode or args.pose_mode in ("quat", "ortho6d") else 1e-1) * loss_pose
+            loss_value_dict["loss/pose"] = loss_pose.item()
+            if any(
+                (
+                    args.use_pose_rest_loss,
+                    args.use_pose_rest_prior_loss,
+                    args.use_pose_connect_loss,
+                    args.use_pose_adv_loss,
+                )
+            ):
+                if "local" in args.pose_mode:
+                    if args.pose_mode == "local_quat":
+                        pose_trans_ = quat_to_matrix(pose_trans)
+                    else:
+                        pose_trans_ = pose_trans
+                    root_trans_inv = torch.einsum(
+                        "bij,bjk->bik", gt.global_transform_matrix, gt.global_transform_rest_inv_matrix
+                    )
+                    root_pose = torch.einsum("bij,bnjk->bnik", root_trans_inv[..., :3, :3], pose_trans_[:, :1])
+                    pose_trans_matrix, _ = pose_local_to_global(
+                        torch.cat([root_pose, pose_trans_[:, 1:]], dim=1),
+                        gt.joints.nan_to_num(nan=0.0),
+                        torch.tensor(KINEMATIC_TREE.parent_indices),
+                        gt.rest_joints_.nan_to_num(nan=0.0)[:, 0] - gt.joints.nan_to_num(nan=0.0)[:, 0],
+                        relative_to_source=True,
+                    )
+                    root_trans = torch.einsum(
+                        "bij,bjk->bik", gt.global_transform_rest_matrix, gt.global_transform_inv_matrix
+                    )
+                    pose_trans_matrix = torch.einsum("bij,bnjk->bnik", root_trans, pose_trans_matrix)
+                    rest_joints = apply_transform(gt.joints.nan_to_num(nan=0.0), pose_trans_matrix)
+                elif args.pose_mode in ("quat", "ortho6d"):
+                    pose_trans_matrix, rest_joints = pose_rot_to_global(
+                        pose_trans,
+                        gt.joints.nan_to_num(nan=0.0),
+                        torch.tensor(KINEMATIC_TREE.parent_indices),
+                        gt.rest_joints.nan_to_num(nan=0.0)[:, 0] - gt.joints.nan_to_num(nan=0.0)[:, 0],
+                    )
                 else:
-                    pose_trans_ = pose_trans
-                root_trans_inv = torch.einsum(
-                    "bij,bjk->bik", gt.global_transform_matrix, gt.global_transform_rest_inv_matrix
-                )
-                root_pose = torch.einsum("bij,bnjk->bnik", root_trans_inv[..., :3, :3], pose_trans_[:, :1])
-                pose_trans_matrix, _ = pose_local_to_global(
-                    torch.cat([root_pose, pose_trans_[:, 1:]], dim=1),
-                    gt.joints.nan_to_num(nan=0.0),
-                    torch.tensor(KINEMATIC_TREE.parent_indices),
-                    gt.rest_joints_.nan_to_num(nan=0.0)[:, 0] - gt.joints.nan_to_num(nan=0.0)[:, 0],
-                    relative_to_source=True,
-                )
-                root_trans = torch.einsum(
-                    "bij,bjk->bik", gt.global_transform_rest_matrix, gt.global_transform_inv_matrix
-                )
-                pose_trans_matrix = torch.einsum("bij,bnjk->bnik", root_trans, pose_trans_matrix)
-                rest_joints = apply_transform(gt.joints.nan_to_num(nan=0.0), pose_trans_matrix)
-            elif args.pose_mode in ("quat", "ortho6d"):
-                pose_trans_matrix, rest_joints = pose_rot_to_global(
-                    pose_trans,
-                    gt.joints.nan_to_num(nan=0.0),
-                    torch.tensor(KINEMATIC_TREE.parent_indices),
-                    gt.rest_joints.nan_to_num(nan=0.0)[:, 0] - gt.joints.nan_to_num(nan=0.0)[:, 0],
-                )
-            else:
-                pose_trans_matrix = to_pose_matrix(
-                    pose_trans,
-                    input_mode=args.pose_mode.replace("ortho6d", "matrix"),
-                    source=gt.joints.nan_to_num(nan=0.0),
-                )
-                rest_joints = apply_transform(gt.joints.nan_to_num(nan=0.0), pose_trans_matrix)
-            rest_joints_tail = apply_transform(gt.joints_tail.nan_to_num(nan=0.0), pose_trans_matrix)
-            if args.use_pose_rest_loss:
-                loss_pose_rest = criterion(rest_joints[gt.joints_mask], gt.rest_joints[gt.joints_mask])
-                loss += 1e-1 * loss_pose_rest
-                loss_value_dict["loss/pose_rest"] = loss_pose_rest.item()
-            # hips_transform = Transform3d(
-            #     matrix=PoseData(
-            #         joints=rest_joints.detach(), joints_tail=rest_joints_tail.detach()
-            #     ).hips_transform.transpose(-1, -2)
-            # )
-            # rest_joints = hips_transform.transform_points(rest_joints)
-            # rest_joints_tail = hips_transform.transform_points(rest_joints_tail)
-            vis_data["pose_rest_joints"] = torch.cat([rest_joints, rest_joints_tail], dim=1)
-            if args.use_rest_prior_loss:
-                loss_rest_prior = rest_prior_loss_fn(rest_joints, rest_joints_tail)
-                loss += 1e-2 * loss_rest_prior
-                loss_value_dict["loss/pose_rest_prior"] = loss_rest_prior.item()
-            if args.use_pose_connect_loss:
-                loss_pose_connect = connect_loss_fn(rest_joints, rest_joints_tail)
-                loss += 1e-2 * loss_pose_connect
-                loss_value_dict["loss/pose_connect"] = loss_pose_connect.item()
-            if args.use_pose_adv_loss:
-                from model import adv_loss_g
-                from util.dataset_mixamo import keep_exists
+                    pose_trans_matrix = to_pose_matrix(
+                        pose_trans,
+                        input_mode=args.pose_mode.replace("ortho6d", "matrix"),
+                        source=gt.joints.nan_to_num(nan=0.0),
+                    )
+                    rest_joints = apply_transform(gt.joints.nan_to_num(nan=0.0), pose_trans_matrix)
+                rest_joints_tail = apply_transform(gt.joints_tail.nan_to_num(nan=0.0), pose_trans_matrix)
+                if args.use_pose_rest_loss:
+                    loss_pose_rest = criterion(rest_joints[gt.joints_mask], gt.rest_joints[gt.joints_mask])
+                    loss += 1e-1 * loss_pose_rest
+                    loss_value_dict["loss/pose_rest"] = loss_pose_rest.item()
+                # hips_transform = Transform3d(
+                #     matrix=PoseData(
+                #         joints=rest_joints.detach(), joints_tail=rest_joints_tail.detach()
+                #     ).hips_transform.transpose(-1, -2)
+                # )
+                # rest_joints = hips_transform.transform_points(rest_joints)
+                # rest_joints_tail = hips_transform.transform_points(rest_joints_tail)
+                vis_data["pose_rest_joints"] = torch.cat([rest_joints, rest_joints_tail], dim=1)
+                if args.use_pose_rest_prior_loss:
+                    loss_rest_prior = rest_prior_loss_fn(rest_joints, rest_joints_tail)
+                    loss += 1e-2 * loss_rest_prior
+                    loss_value_dict["loss/pose_rest_prior"] = loss_rest_prior.item()
+                if args.use_pose_connect_loss:
+                    loss_pose_connect = connect_loss_fn(rest_joints, rest_joints_tail)
+                    loss += 1e-2 * loss_pose_connect
+                    loss_value_dict["loss/pose_connect"] = loss_pose_connect.item()
+                if args.use_pose_adv_loss:
+                    from model import adv_loss_g
+                    from util.dataset_mixamo import keep_exists
 
-                model_D = get_discriminator(gt.device, args.distributed, (args.gpu,))[0]
-                model_D.eval()
-                rest_joints_real = torch.cat((gt.rest_joints, gt.rest_joints_tail), dim=-1)
-                # rest_joints_real = keep_exists(rest_joints_real)
-                rest_joints_real = rest_joints_real.nan_to_num(nan=0.0)
-                rest_joints_fake = torch.cat((rest_joints, rest_joints_tail), dim=-1)
-                # rest_joints_fake = keep_exists(rest_joints_fake)
-                rest_joints_fake = rest_joints_fake.nan_to_num(nan=0.0)
-                gt.d_real, gt.d_fake = rest_joints_real.detach(), rest_joints_fake.detach()
-                loss_G = adv_loss_g(model_D(rest_joints_fake, mask=gt.joints_mask))
-                loss += 1e-4 * loss_G
-                loss_value_dict["loss/pose_adv_g"] = loss_G.item()
+                    model_D = get_discriminator(gt.device, args.distributed, (args.gpu,))[0]
+                    model_D.eval()
+                    rest_joints_real = torch.cat((gt.rest_joints, gt.rest_joints_tail), dim=-1)
+                    # rest_joints_real = keep_exists(rest_joints_real)
+                    rest_joints_real = rest_joints_real.nan_to_num(nan=0.0)
+                    rest_joints_fake = torch.cat((rest_joints, rest_joints_tail), dim=-1)
+                    # rest_joints_fake = keep_exists(rest_joints_fake)
+                    rest_joints_fake = rest_joints_fake.nan_to_num(nan=0.0)
+                    gt.d_real, gt.d_fake = rest_joints_real.detach(), rest_joints_fake.detach()
+                    loss_G = adv_loss_g(model_D(rest_joints_fake, mask=gt.joints_mask))
+                    loss += 1e-4 * loss_G
+                    loss_value_dict["loss/pose_adv_g"] = loss_G.item()
+        else:
+            assert args.pose_attn_causal_discrete
+            from model import tokenize
+
+            if args.pose_mode == "ortho6d":
+                pose_gt = gt.pose_p2r_ortho6d
+            else:
+                raise NotImplementedError(f"{args.pose_mode=}")
+            loss_fct = torch.nn.CrossEntropyLoss()
+            vocab_size = pose_trans.shape[-1]
+            pose_logits = pose_trans[gt.joints_mask]
+            labels = tokenize(pose_gt[gt.joints_mask], num_discrete=vocab_size)
+            loss_pose = loss_fct(pose_logits.view(-1, vocab_size), labels.view(-1))
+            loss += 1e-1 * loss_pose
+            loss_value_dict["loss/pose"] = loss_pose.item()
 
     assert isinstance(loss, torch.Tensor), "No loss"
     loss_value = loss.item()
@@ -491,7 +526,7 @@ def train_one_epoch(
         data: PoseData
         # Inputs
         if args.aug_rotation:
-            assert not args.use_rest_prior_loss
+            assert not (args.use_joints_rest_prior_loss or args.use_pose_rest_prior_loss)
             rotate = Rotate(R=random_rotations(len(data)))
         else:
             rotate = Transform3d(matrix=data.hips_transform.transpose(-1, -2))
@@ -529,10 +564,12 @@ def train_one_epoch(
         with torch.cuda.amp.autocast(enabled=False):
             model.train()
             joints_gt = pose_gt = None
-            if (args.predict_joints and args.joints_attn_causal) or (
-                args.predict_pose_trans and args.pose_input_joints
+            if (
+                (args.predict_joints and args.joints_attn_causal)
+                or (args.predict_bw and args.bw_input_joints)
+                or (args.predict_pose_trans and args.pose_input_joints)
             ):
-                if args.predict_joints_tail or args.pose_input_joints:
+                if args.predict_joints_tail or args.bw_input_joints or args.pose_input_joints:
                     joints_gt = torch.cat((gt.joints, gt.joints_tail), dim=-1).nan_to_num(nan=0.0)
                 else:
                     joints_gt = gt.joints.nan_to_num(nan=0.0)
@@ -701,7 +738,7 @@ def evaluate(data_loader: DataLoader, model: PCAE, device: torch.device, args):
                 verts,
                 joints=(
                     torch.cat((gt.joints.nan_to_num(nan=0.0), gt.joints_tail.nan_to_num(nan=0.0)), dim=-1)
-                    if args.pose_input_joints
+                    if args.bw_input_joints or args.pose_input_joints
                     else None
                 ),
             )

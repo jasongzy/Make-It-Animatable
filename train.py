@@ -42,12 +42,16 @@ def get_args_parser():
     parser.add_argument("--actvn", default="softmax", type=str, choices=("softmax", "sigmoid", "relu", "softplus"))
     parser.add_argument("--aug_rotation", type=str2bool, default=True)
     parser.add_argument("--drop_normal_ratio", type=float, default=0.0)
+    parser.add_argument("--sharing_embed", default=tuple(), type=str2list(str))
     parser.add_argument("--predict_bw", type=str2bool, default=True)
+    parser.add_argument("--bw_dot", type=str2bool, default=False)
+    parser.add_argument("--bw_input_joints", type=str2bool, default=False)
     parser.add_argument("--predict_joints", type=str2bool, default=False)
     parser.add_argument("--predict_joints_tail", type=str2bool, default=False)
     parser.add_argument("--joints_attn", type=str2bool, default=False)
     parser.add_argument("--joints_attn_masked", type=str2bool, default=True)
     parser.add_argument("--joints_attn_causal", type=str2bool, default=False)
+    parser.add_argument("--joints_attn_causal_discrete", type=str2bool, default=False)
     parser.add_argument("--predict_global_trans", type=str2bool, default=False)
     parser.add_argument("--predict_pose_trans", type=str2bool, default=False)
     parser.add_argument(
@@ -70,13 +74,15 @@ def get_args_parser():
     parser.add_argument("--pose_attn", type=str2bool, default=False)
     parser.add_argument("--pose_attn_masked", type=str2bool, default=True)
     parser.add_argument("--pose_attn_causal", type=str2bool, default=False)
+    parser.add_argument("--pose_attn_causal_discrete", type=str2bool, default=False)
 
     # Optimizer parameters
     parser.add_argument("--loss", default="l1", type=str, choices=("l2", "l1", "kl"))
     parser.add_argument("--use_joints_connect_loss", type=str2bool, default=True)
     parser.add_argument("--use_joints_rest_loss", type=str2bool, default=False)
+    parser.add_argument("--use_joints_rest_prior_loss", type=str2bool, default=False)
     parser.add_argument("--use_pose_rest_loss", type=str2bool, default=False)
-    parser.add_argument("--use_rest_prior_loss", type=str2bool, default=False)
+    parser.add_argument("--use_pose_rest_prior_loss", type=str2bool, default=True)
     parser.add_argument("--use_pose_connect_loss", type=str2bool, default=False)
     parser.add_argument("--use_pose_adv_loss", type=str2bool, default=False)
     parser.add_argument(
@@ -254,12 +260,16 @@ def main(args):
         kinematic_tree=KINEMATIC_TREE,
         tune_decoder_self_attn=True,
         tune_decoder_cross_attn=True,
+        sharing_embed=args.sharing_embed,
         predict_bw=args.predict_bw,
+        bw_dot=args.bw_dot,
+        bw_input_joints=args.bw_input_joints,
         predict_joints=args.predict_joints,
         predict_joints_tail=args.predict_joints_tail,
         joints_attn=args.joints_attn,
         joints_attn_masked=args.joints_attn_masked,
         joints_attn_causal=args.joints_attn_causal,
+        joints_attn_causal_discrete=args.joints_attn_causal_discrete,
         predict_global_trans=args.predict_global_trans,
         predict_pose_trans=args.predict_pose_trans,
         pose_mode=args.pose_mode,
@@ -267,6 +277,7 @@ def main(args):
         pose_attn=args.pose_attn,
         pose_attn_masked=args.pose_attn_masked,
         pose_attn_causal=args.pose_attn_causal,
+        pose_attn_causal_discrete=args.pose_attn_causal_discrete,
     )
     if args.resume:
         args.resume = find_ckpt(args.resume)

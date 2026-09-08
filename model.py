@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from einops import repeat
 from torch_cluster import fps
 
-from models_ae import Attention, DiagonalGaussianDistribution, create_autoencoder
+from models_ae import Attention, DiagonalGaussianDistribution, FeedForward, PreNorm, create_autoencoder
 from util.dataset_mixamo import Joint
 from util.utils import find_ckpt
 
@@ -127,6 +127,35 @@ class TransformMLP(nn.Module):
         return torch.cat([transl, rotation, scaling], dim=-1)
 
 
+class CrossAttention(nn.Module):
+    def __init__(self, feat_dim: int, dim_head: int, heads: int):
+        super().__init__()
+        self.cross_attn = PreNorm(
+            feat_dim,
+            Attention(feat_dim, feat_dim, heads=heads, dim_head=dim_head),
+            context_dim=feat_dim,
+        )
+        self.ff = PreNorm(feat_dim, FeedForward(feat_dim))
+
+    def forward(self, query: torch.Tensor | list[torch.Tensor], context: torch.Tensor = None):
+        """
+        Args:
+            query: [B, N1, D]
+            context: [B, N2, D]
+        Returns:
+            [B, N1, D]
+        """
+        if isinstance(query, (list, tuple)):
+            flag_cat = True
+            query_shapes = [x.shape[1] for x in query]
+            query = torch.cat(query, dim=1)
+        else:
+            flag_cat = False
+        logits = self.cross_attn(query, context=context)
+        logits = logits + self.ff(logits)
+        return torch.split(logits, query_shapes, dim=1) if flag_cat else logits
+
+
 class JointsAttention(nn.Module):
     def __init__(self, feat_dim: int, heads=8, dim_head=64, masked=True, kinematic_tree: Joint = None, *args, **xargs):
         super().__init__()
@@ -209,12 +238,16 @@ class PCAE(nn.Module):
         kinematic_tree: Joint = None,
         tune_decoder_self_attn=True,
         tune_decoder_cross_attn=True,
+        sharing_embed=tuple(),
         predict_bw=True,
+        bw_dot=False,
+        bw_input_joints=False,
         predict_joints=False,
         predict_joints_tail=False,
         joints_attn=False,
         joints_attn_masked=True,
         joints_attn_causal=False,
+        joints_attn_causal_discrete=False,
         predict_global_trans=False,
         predict_pose_trans=False,
         pose_mode="dual_quat",
@@ -222,20 +255,21 @@ class PCAE(nn.Module):
         pose_attn=False,
         pose_attn_masked=True,
         pose_attn_causal=False,
+        pose_attn_causal_discrete=False,
         grid_density=128,
     ):
         super().__init__()
 
         self.N = N
         self.base = create_autoencoder(dim=512, M=num_latents, N=self.N, latent_dim=8, deterministic=deterministic)
-        embed_dim = self.base.point_embed.mlp.out_features
-        feat_dim = self.base.decoder_cross_attn.fn.to_out.out_features
+        self.embed_dim = self.base.point_embed.mlp.out_features
+        self.feat_dim = self.base.decoder_cross_attn.fn.to_out.out_features
 
         self.input_dims = [3]
         self.input_normal = input_normal
         if self.input_normal:
             self.input_dims.append(3)
-            self.normal_embed = JointsEmbedder(out_dim=embed_dim)
+            self.normal_embed = JointsEmbedder(out_dim=self.embed_dim)
             nn.init.zeros_(self.normal_embed.mlp.weight)
             nn.init.zeros_(self.normal_embed.mlp.bias)
         else:
@@ -246,16 +280,28 @@ class PCAE(nn.Module):
         else:
             self.input_attention = input_attention
         if self.input_attention:
-            self.input_attn = InputAttention(embed_dim)
+            self.input_attn = InputAttention(self.embed_dim)
 
         self.hierarchical_ratio = float(hierarchical_ratio)
         assert 0 <= hierarchical_ratio < 1.0, f"{hierarchical_ratio=} must be in [0, 1)"
 
         self.output_dim = output_dim
+        assert len(sharing_embed) != 1, "len(sharing_embed) must be 0 or > 1"
+        self.sharing_embed = sharing_embed
+        self.shared_embed = None
 
         self.predict_bw = predict_bw
         if self.predict_bw:
-            self.bw_head = nn.Linear(feat_dim, self.output_dim)
+            assert not bw_input_joints or (bw_input_joints and bw_dot), "bw_input_joints requires bw_dot"
+            self.bw_dot = bw_dot
+            if self.bw_dot:
+                self.bw_embed = self.get_embed("bw")
+                self.bw_cross_attn = CrossAttention(self.feat_dim, dim_head=self.feat_dim, heads=1)
+            else:
+                self.bw_head = nn.Linear(self.feat_dim, self.output_dim)
+            self.bw_input_joints = bw_input_joints
+            if self.bw_input_joints:
+                self.joints_embedder = JointsEmbedder(include_tail=True, out_dim=self.embed_dim)
             output_actvn = output_actvn.lower()
             if output_actvn == "softmax":
                 # self.actvn = nn.LogSoftmax(dim=-1) if self.output_actvn_log else nn.Sigmoid(dim=-1)
@@ -277,31 +323,48 @@ class PCAE(nn.Module):
         self.predict_joints = predict_joints
         self.predict_joints_tail = predict_joints_tail
         if self.predict_joints:
-            self.joints_embed = nn.Parameter(torch.randn(1, self.output_dim, embed_dim))
             joints_dim = 6 if self.predict_joints_tail else 3
             assert not (joints_attn and joints_attn_causal), "Conflict arguments: joints_attn & joints_attn_causal"
+            assert not (
+                not joints_attn_causal and joints_attn_causal_discrete
+            ), "Conflict arguments: !joints_attn & joints_attn_causal_discrete"
             self.joints_attn_causal = joints_attn_causal
+            self.joints_attn_causal_discrete = joints_attn_causal_discrete
+            if self.joints_attn_causal and self.joints_attn_causal_discrete:
+                self.joints_embed = nn.Parameter(torch.randn(1, self.output_dim * joints_dim, self.embed_dim))
+            else:
+                self.joints_embed = self.get_embed("joints")
             if joints_attn:
                 self.joints_head = nn.Sequential(
-                    JointsAttention(feat_dim, masked=joints_attn_masked, kinematic_tree=kinematic_tree),
-                    nn.Linear(feat_dim, joints_dim),
+                    JointsAttention(self.feat_dim, masked=joints_attn_masked, kinematic_tree=kinematic_tree),
+                    nn.Linear(self.feat_dim, joints_dim),
                 )
             elif self.joints_attn_causal:
-                self.joints_head = JointsAttentionCausal(
-                    feat_dim,
-                    kinematic_tree=kinematic_tree,
-                    out_type="joints",
-                    include_joints_tail=self.predict_joints_tail,
-                    out_dim=joints_dim,
-                    query_type="embedding",
-                )
+                if self.joints_attn_causal_discrete:
+                    assert self.predict_joints_tail
+                    self.joints_head = JointsAttentionCausalDiscrete(
+                        self.feat_dim,
+                        kinematic_tree=kinematic_tree,
+                        out_type="joints",
+                        out_dim=joints_dim,
+                        query_type="embedding",
+                    )
+                else:
+                    self.joints_head = JointsAttentionCausal(
+                        self.feat_dim,
+                        kinematic_tree=kinematic_tree,
+                        out_type="joints",
+                        include_joints_tail=self.predict_joints_tail,
+                        out_dim=joints_dim,
+                        query_type="embedding",
+                    )
             else:
-                self.joints_head = nn.Linear(feat_dim, joints_dim)
+                self.joints_head = nn.Linear(self.feat_dim, joints_dim)
 
         self.predict_global_trans = predict_global_trans
         if self.predict_global_trans:
-            self.global_embed = nn.Parameter(torch.randn(1, 1, embed_dim))
-            self.global_head = TransformMLP(feat_dim, transl_dim=3, rotation_dim=4, scaling_dim=1)
+            self.global_embed = nn.Parameter(torch.randn(1, 1, self.embed_dim))
+            self.global_head = TransformMLP(self.feat_dim, transl_dim=3, rotation_dim=4, scaling_dim=1)
 
         self.predict_pose_trans = predict_pose_trans
         assert pose_mode in (
@@ -318,35 +381,65 @@ class PCAE(nn.Module):
         self.pose_mode = pose_mode
         self.pose_input_joints = pose_input_joints
         if self.predict_pose_trans:
-            self.pose_embed = nn.Parameter(torch.randn(1, self.output_dim, embed_dim))
             if "local" in self.pose_mode or self.pose_mode in ("quat", "ortho6d"):
                 rotation_dim = pose_dim = 6 if "ortho6d" in self.pose_mode else 4
-                self.pose_head = TransformMLP(feat_dim, transl_dim=0, rotation_dim=rotation_dim, scaling_dim=0)
+                self.pose_head = TransformMLP(self.feat_dim, transl_dim=0, rotation_dim=rotation_dim, scaling_dim=0)
             else:
                 transl_dim = 4 if self.pose_mode == "dual_quat" else 3
                 rotation_dim = 6 if "ortho6d" in self.pose_mode else 4
                 pose_dim = transl_dim + rotation_dim
-                self.pose_head = TransformMLP(feat_dim, transl_dim=transl_dim, rotation_dim=rotation_dim, scaling_dim=0)
+                self.pose_head = TransformMLP(
+                    self.feat_dim, transl_dim=transl_dim, rotation_dim=rotation_dim, scaling_dim=0
+                )
             if self.pose_input_joints:
-                self.joints_embedder = JointsEmbedder(include_tail=True, out_dim=embed_dim)
+                self.joints_embedder = JointsEmbedder(include_tail=True, out_dim=self.embed_dim)
             assert not (pose_attn and pose_attn_causal), "Conflict arguments: pose_attn & pose_attn_causal"
+            assert not (
+                not pose_attn_causal and pose_attn_causal_discrete
+            ), "Conflict arguments: !pose_attn & pose_attn_causal_discrete"
+            assert not (
+                self.pose_input_joints and pose_attn_causal_discrete
+            ), "Conflict arguments: pose_input_joints & pose_attn_causal_discrete"
             self.pose_attn_causal = pose_attn_causal
+            self.pose_attn_causal_discrete = pose_attn_causal_discrete
+            if self.pose_attn_causal and self.pose_attn_causal_discrete:
+                self.pose_embed = nn.Parameter(torch.randn(1, self.output_dim * pose_dim, self.embed_dim))
+            else:
+                self.pose_embed = self.get_embed("pose")
             if pose_attn:
                 self.pose_head = nn.Sequential(
-                    JointsAttention(feat_dim, masked=pose_attn_masked, kinematic_tree=kinematic_tree), self.pose_head
+                    JointsAttention(self.feat_dim, masked=pose_attn_masked, kinematic_tree=kinematic_tree),
+                    self.pose_head,
                 )
             elif self.pose_attn_causal:
-                self.pose_head = JointsAttentionCausal(
-                    feat_dim,
-                    kinematic_tree=kinematic_tree,
-                    out_type="pose",
-                    out_dim=pose_dim,
-                    rotation_dim=rotation_dim,
-                    query_type="embedding",
-                )
+                if self.pose_attn_causal_discrete:
+                    self.pose_head = JointsAttentionCausalDiscrete(
+                        self.feat_dim,
+                        kinematic_tree=kinematic_tree,
+                        out_type="pose",
+                        out_dim=pose_dim,
+                        query_type="embedding",
+                    )
+                else:
+                    self.pose_head = JointsAttentionCausal(
+                        self.feat_dim,
+                        kinematic_tree=kinematic_tree,
+                        out_type="pose",
+                        out_dim=pose_dim,
+                        rotation_dim=rotation_dim,
+                        query_type="embedding",
+                    )
 
         self.grid_density = grid_density
         self.grid = None
+
+    def get_embed(self, name: str):
+        if name in self.sharing_embed:
+            if self.shared_embed is None:
+                self.shared_embed = nn.Parameter(torch.randn(1, self.output_dim, self.embed_dim))
+            return self.shared_embed
+        else:
+            return nn.Parameter(torch.randn(1, self.output_dim, self.embed_dim))
 
     def adapt_ckpt(self, ckpt: dict[str, torch.Tensor]):
         def access_attr(obj, attr: str):
@@ -589,6 +682,7 @@ class PCAE(nn.Module):
         x = self.encode(pc)
 
         learnable_embeddings = (
+            self.bw_embed if self.predict_bw and self.bw_dot else None,
             self.joints_embed if self.predict_joints else None,
             self.global_embed if self.predict_global_trans else None,
             self.pose_embed if self.predict_pose_trans else None,
@@ -609,17 +703,26 @@ class PCAE(nn.Module):
         if self.predict_pose_trans and self.pose_input_joints:
             assert joints is not None and joints.shape[:-1] == (pc.shape[0], self.pose_embed.shape[1])
             joints_embed = self.joints_embedder(joints)
-            pose_embed_length = learnable_embeddings_length[2]
+            pose_embed_length = learnable_embeddings_length[3]
             learnable_embeddings[:, -pose_embed_length:] = learnable_embeddings[:, -pose_embed_length:] + joints_embed
+        if self.predict_bw and self.bw_input_joints:
+            assert joints is not None and joints.shape[:-1] == (pc.shape[0], self.bw_embed.shape[1])
+            joints_embed = self.joints_embedder(joints)
+            bw_embed_length = learnable_embeddings_length[0]
+            learnable_embeddings[:, :bw_embed_length] = learnable_embeddings[:, :bw_embed_length] + joints_embed
 
         logits = self.decode(x, queries, learnable_embeddings)
         if learnable_embeddings is not None:
-            logits, logits_joints, logits_global, logits_pose = torch.split(
+            logits, logits_bw, logits_joints, logits_global, logits_pose = torch.split(
                 logits, [queries.shape[1]] + learnable_embeddings_length, dim=1
             )
 
         if self.predict_bw:
-            bw: torch.Tensor = self.bw_head(logits)
+            if self.bw_dot:
+                logits, logits_bw = self.bw_cross_attn((logits, logits_bw), context=logits_bw)
+                bw = torch.einsum("bnd,bkd->bnk", logits, logits_bw)
+            else:
+                bw: torch.Tensor = self.bw_head(logits)
             bw = self.actvn(bw)
             if not isinstance(self.actvn, nn.Softmax):
                 bw = bw / (bw.sum(dim=-1, keepdim=True) + 1e-10)
@@ -630,6 +733,8 @@ class PCAE(nn.Module):
 
         if self.predict_joints:
             if self.joints_attn_causal:
+                if self.joints_attn_causal_discrete:
+                    logits_joints = logits_joints.reshape(logits_joints.shape[0], self.output_dim, -1, self.embed_dim)
                 joints = self.joints_head(logits_joints, out_gt=joints)
             else:
                 joints = self.joints_head(logits_joints)
@@ -640,6 +745,8 @@ class PCAE(nn.Module):
 
         if self.predict_pose_trans:
             if self.pose_attn_causal:
+                if self.pose_attn_causal_discrete:
+                    logits_pose = logits_pose.reshape(logits_pose.shape[0], self.output_dim, -1, self.embed_dim)
                 pose_trans = self.pose_head(logits_pose, out_gt=pose)
             else:
                 pose_trans = self.pose_head(logits_pose)
@@ -940,3 +1047,135 @@ class JointsAttentionCausal(nn.Module):
                 out[mask.expand(B, -1)] = out_[mask.expand(B, -1)]
         # assert out.isfinite().all()
         return out
+
+
+def tokenize(coords: torch.Tensor, coord_continuous_range: tuple[float, float] = (-1.0, 1.0), num_discrete=256):
+    low, high = coord_continuous_range
+    normalized = (coords - low) / (high - low)  # (coords + 1) / 2, to [0, 1)
+    scaled = normalized * num_discrete  # to [0, num_discrete)
+    tokens = torch.floor(scaled).to(torch.long)
+    tokens = torch.clamp(tokens, 0, num_discrete - 1)  # to [0, num_discrete - 1]
+    return tokens
+
+
+def detokenize(ids: torch.Tensor, coord_continuous_range: tuple[float, float] = (-1.0, 1.0), num_discrete=256):
+    low, high = coord_continuous_range
+    assert high > low
+    assert (ids >= 0).all() and (ids < num_discrete).all()
+    coords = ids.float()
+    coords /= num_discrete
+    coords = coords * (high - low) + low
+    assert (coords >= low).all() and (coords < high).all()
+    return coords
+
+
+class JointsAttentionCausalDiscrete(nn.Module):
+    def __init__(
+        self,
+        feat_dim: int,
+        kinematic_tree: Joint,
+        heads=8,
+        depth=8,
+        out_type="joints",
+        out_dim=6,
+        query_type="embedding",
+        zero_init=False,
+    ):
+        super().__init__()
+
+        self.transformer = Transformer(feat_dim, depth=depth, heads=heads, norm_first=True, zero_init=zero_init)
+        self.out_type = out_type
+        self.out_dim = out_dim
+        if self.out_type in ("joints", "pose"):
+            self.coord_continuous_range = (-1.0, 1.0)
+            self.num_discrete = 256
+            self.embed_tokens = nn.Embedding(self.num_discrete, feat_dim)
+            self.head = nn.Linear(feat_dim, self.num_discrete, bias=False)
+        else:
+            raise NotImplementedError(f"{self.out_type=}")
+        self.query_type = query_type
+
+        mask_attn = torch.zeros((len(kinematic_tree), len(kinematic_tree)), dtype=torch.bool)
+        self.register_buffer("mask_attn", mask_attn, persistent=False)
+        self.mask_attn: torch.Tensor
+
+        mask_parent = mask_attn.clone()
+        for joint in kinematic_tree:
+            mask_attn[joint.index, joint.index] = True
+            for parent in joint.parent_recursive:
+                mask_attn[joint.index, parent.index] = True
+            if joint.parent is not None:
+                mask_parent[joint.index, joint.parent.index] = True
+        self.register_buffer("mask_parent", mask_parent, persistent=False)
+        self.mask_parent: torch.Tensor
+        tree_levels_mask = torch.tensor(kinematic_tree.tree_levels_mask)
+        self.register_buffer("tree_levels_mask", tree_levels_mask, persistent=False)
+        self.tree_levels_mask: torch.Tensor
+
+    def _forward(self, feat: torch.Tensor, out_gt_ids: torch.Tensor = None, out_gt_mask: torch.Tensor = None):
+        """
+        Args:
+            feat: [B, N, `self.out_dim`, D]
+            out_gt_ids: [B, N, `self.out_dim`] int
+            out_gt_mask: [B, N] bool
+        Returns:
+            next_tokens_logits: [B, N, `self.out_dim`, `self.num_discrete`]
+            next_tokens: [B, N, `self.out_dim`] int
+        """
+        B, N, _, D = feat.shape
+        num_tokens_per_joint = out_gt_ids.shape[-1]
+        out_gt_feat: torch.Tensor = self.embed_tokens(out_gt_ids)  # B, N, 6, D
+        if out_gt_mask is not None:
+            out_gt_feat[~out_gt_mask] = 0
+
+        out_gt_feat = out_gt_feat.unsqueeze(1).expand(-1, N, -1, -1, -1).clone()  # B, (N), N, 6, D
+        out_gt_feat[~self.mask_parent.expand(B, -1, -1)] = 0
+        out_gt_feat = out_gt_feat.sum(-3)  # B, (N), 6, D
+        if self.query_type == "embedding":
+            in_feat = out_gt_feat + feat
+        else:
+            raise NotImplementedError(f"{self.query_type=}")
+        # mask = torch.triu(
+        #     torch.ones((N * self.out_dim, N * self.out_dim), dtype=torch.bool, device=feat.device), diagonal=1
+        # )
+        mask = torch.kron(
+            self.mask_attn,
+            torch.ones((num_tokens_per_joint, num_tokens_per_joint), dtype=bool, device=self.mask_attn.device),
+        )
+
+        in_feat_attn = self.transformer(in_feat.reshape(B, -1, D), mask=mask)  # B, N * 6, D
+        next_tokens_logits: torch.Tensor = self.head(in_feat_attn)  # B, N * 6, 256
+        next_tokens_logits = next_tokens_logits.reshape(B, N, num_tokens_per_joint, self.num_discrete)  # B, N, 6, 256
+        next_tokens = torch.argmax(next_tokens_logits, dim=-1)
+        return next_tokens_logits, next_tokens
+
+    def forward(self, feat: torch.Tensor, out_gt: torch.Tensor = None):
+        """
+        Args:
+            feat: [B, N, `self.out_dim`, D]
+        Returns:
+            training: [B, N, `self.out_dim`, `self.num_discrete`]
+            else: [B, N, `self.out_dim`]
+        """
+        B, N = feat.shape[:2]
+
+        if self.training:
+            assert out_gt is not None and out_gt.shape == (B, N, self.out_dim)
+            if self.out_type == "pose" and out_gt.shape[-1] == 6:
+                from util.utils import matrix_to_ortho6d, ortho6d_to_matrix
+
+                out_gt = matrix_to_ortho6d(ortho6d_to_matrix(out_gt))
+            out_gt_ids = tokenize(out_gt, self.coord_continuous_range, self.num_discrete)
+            next_tokens_logits, next_tokens = self._forward(feat, out_gt_ids)
+            return next_tokens_logits
+        else:
+            out_ids = torch.zeros((B, N, self.out_dim), dtype=int, device=feat.device)
+            out_mask = torch.zeros((B, N), dtype=torch.bool, device=feat.device)
+            for mask in self.tree_levels_mask:
+                if not any(mask):
+                    continue
+                next_tokens_logits, next_tokens = self._forward(feat, out_ids, out_mask)
+                out_ids[mask.expand(B, -1)] = next_tokens[mask.expand(B, -1)]
+                out_mask[mask.expand(B, -1)] = True
+            out = detokenize(out_ids, self.coord_continuous_range, self.num_discrete)
+            return out
