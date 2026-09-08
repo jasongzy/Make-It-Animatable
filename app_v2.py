@@ -626,13 +626,12 @@ def prepare_input(input_path: str, is_gs=False, opacity_threshold=0.0, db: DB = 
         # mesh.export("input.ply")
     else:
         mesh: trimesh.Trimesh = trimesh.load(input_path, force="mesh")
+        if not isinstance(mesh, trimesh.Trimesh) or mesh.faces.shape[0] == 0:
+            raise gr.Error("Input must be a mesh")
         verts = np.array(mesh.vertices).astype(np.float32)
         sample_mask = None
-        if isinstance(mesh, trimesh.PointCloud):
-            faces = None
-        else:
-            verts_normal = np.array(mesh.vertex_normals).astype(np.float32)
-            faces = np.array(mesh.faces)
+        verts_normal = np.array(mesh.vertex_normals).astype(np.float32)
+        faces = np.array(mesh.faces)
     is_mesh = faces is not None
     pts = sample_mesh(get_masked_mesh(mesh, sample_mask), N, get_normals=is_mesh).astype(np.float32)
     pts = torch.from_numpy(pts).unsqueeze(0)
@@ -1209,7 +1208,7 @@ def init_models():
         predict_joints_tail=True,
         joints_attn_causal=False,
     )
-    model_bw.load("output/mia_v2/hy3d2.1/bw-joints")
+    model_bw.load("output/best/v2/bw_joints.pth")
     model_bw.to("cpu" if IS_HF_ZEROGPU else device).eval()
 
     model_joints = model_bw
@@ -1226,7 +1225,7 @@ def init_models():
         predict_joints_tail=True,
         joints_attn_causal=False,
     )
-    model_coarse.load("output/mia_v2/hy3d2.1/joints_coarse-bw-resumeMore5")
+    model_coarse.load("output/best/v2/joints_coarse.pth")
     model_coarse.to(device).eval()
 
     model_pose = PCAE(
@@ -1243,7 +1242,7 @@ def init_models():
         pose_input_joints=True,
         pose_attn_causal=False,
     )
-    model_pose.load("output/mia_v2/hy3d2.1/pose-gelu-more5")
+    model_pose.load("output/best/v2/pose.pth")
     model_pose.to(device).eval()
 
     clear()
@@ -1258,10 +1257,12 @@ def init_blocks():
     except AttributeError:
         pass
     with open(os.path.join(examples_dir, "log.csv"), newline="") as f:
-        examples_data = list(csv.reader(f))[1:]
+        examples_data = [
+            example for example in list(csv.reader(f))[1:] if not str2bool(example[1])
+        ]
     for example in examples_data:
         example[0] = os.path.join(examples_dir, example[0])
-    title = "Make-It-Animatable"
+    title = "MIA v2"
     description = f"""
     <center>
     <h1> 💃 {title} </h1>
@@ -1323,6 +1324,7 @@ def init_blocks():
                                 info="Whether the input model is Gaussians Splats (only support `.ply` format).",
                                 value=False,
                                 interactive=False,
+                                visible=False,
                             )
                             input_opacity_threshold = gr.Slider(
                                 0.0,
@@ -1475,7 +1477,6 @@ def init_blocks():
                             output_rest_vis = gr.Model3D(
                                 label="Rest Pose", display_mode="solid", camera_position=camera_position
                             )
-                            gr.Markdown("**Point clouds** and **Gaussian Splats** are not supported for preview here.")
                 with gr.Row():
                     with gr.Tabs():
                         with gr.Tab("Animatable Model (GLB preview)"):
@@ -1486,7 +1487,6 @@ def init_blocks():
                                 """
                                 - Gradio hasn't support the FBX format yet (see [this issue](https://github.com/gradio-app/gradio/issues/10007)), so we use [FBX2glTF](https://github.com/facebookincubator/FBX2glTF) internally to convert the exported FBX into GLB for quick preview here.
                                 Due to this conversion process, some models may exhibit inconsistencies in material properties and texture rendering. Download the **FBX** file for higher fidelity.
-                                - **Point clouds** and **Gaussian Splats** are not supported for preview here. Download the **FBX**/**BLEND** file to view their results.
                                 """
                             )
                         with gr.Tab("Animatable Model (FBX/BLEND)"):
@@ -1494,16 +1494,13 @@ def init_blocks():
                             gr.Markdown(
                                 """
                                 - Recommend to view and edit in Blender.
-                                - For **Gaussian Splats**, the **[3DGS Render Blender Addon by KIRI Engine](https://github.com/Kiri-Innovation/3dgs-render-blender-addon/releases/tag/v1.0.0)** is required to open the **BLEND** file here.
                                 """
                             )
         with gr.Row():
             gr.Markdown(
                 """
                 Tips:
-                - To Hugging Face demo users: 3D Gaussian Splats are not supported with the ZeroGPU environment (Python 3.10). Setup an environment with Python 3.11 and run this demo locally to enable GS support.
                 - The output results may not be displayed properly if this browser tab is unfocused during inference.
-                - If the results suffer from low blend weight quality (typically occurring when limbs are close together, e.g., inner thigh and armpit), try enabling the **Use Normal** option.
                 - If the pose-to-rest transformation is unsatisfactory, try adding prior knowledge by specifying the **Input Rest Pose** and **Input Rest Parts**.
                     - Alternatively, you can uncheck **Reset to Rest** and clear the **Animation File**, so that the animation result becomes an invertible T-pose model that can be adjusted in Blender.
                 - This demo is designed for standard human skeletons (compatible with the Mixamo definition). If the input 3D model includes significant accessories (e.g., hand-held objects, wings, long tails, long hair), the results may not be optimal.
@@ -1658,7 +1655,7 @@ if __name__ == "__main__":
         allowed_paths=list(map(os.path.abspath, [".", ".."])),
         show_error=True,
         ssr_mode=False,
-        share=True,
+        share=False,
         prevent_thread_lock=True,
     )
 
