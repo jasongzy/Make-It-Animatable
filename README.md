@@ -30,19 +30,12 @@ pip install -r requirements.txt
 
 ## Data Preparation
 
-First of all, get the Git LFS placeholder files (only metadata, won't download the actual data content):
-
 ```bash
-git lfs install
-GIT_LFS_SKIP_SMUDGE=1 git -C data clone https://huggingface.co/datasets/jasongzy/Mixamo
-# git -C data/Mixamo submodule update --init
-GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/jasongzy/Make-It-Animatable /tmp/hf-data  # can be deleted later
-```
-
-Now download some data required for both training and demo:
-
-```bash
-git -C data/Mixamo lfs pull -I 'bones*.fbx,animation'
+# hf auth login
+hf download jasongzy/Mixamo \
+  --repo-type dataset \
+  --include 'bones*.fbx' 'animation/**' \
+  --local-dir data/Mixamo
 ```
 
 ### For Demo
@@ -50,15 +43,17 @@ git -C data/Mixamo lfs pull -I 'bones*.fbx,animation'
 Download the pretrained models:
 
 ```bash
-git -C /tmp/hf-data lfs pull -I output/best/new
-mkdir -p output/best && cp -r /tmp/hf-data/output/best/new output/best/
+hf download jasongzy/Make-It-Animatable \
+  --include 'output/best/new/**' \
+  --local-dir .
 ```
 
 Download the example data:
 
 ```bash
-git -C /tmp/hf-data lfs pull -I data
-cp -r /tmp/hf-data/data/* data/
+hf download jasongzy/Make-It-Animatable \
+  --include 'data/**' \
+  --local-dir .
 ```
 
 Download some tools:
@@ -73,14 +68,18 @@ chmod +x util/FBX2glTF
 Download the training dataset:
 
 ```bash
-git -C data/Mixamo lfs pull -I 'bones*.fbx,animation,animation_extra,character_refined,character_rabit_refined'
+hf download jasongzy/Mixamo \
+  --repo-type dataset \
+  --include 'bones*.fbx' 'animation/**' 'animation_extra/**' 'character_refined/**' 'character_rabit_refined/**' \
+  --local-dir data/Mixamo
 ```
 
 Download the [pretrained](https://github.com/1zb/3DShape2VecSet#balloon-sampling) weights of AE (**only for training from scratch**):
 
 ```bash
-git -C /tmp/hf-data lfs pull -I output/ae
-cp -r /tmp/hf-data/output/ae output/
+hf download jasongzy/Make-It-Animatable \
+  --include 'output/ae/**' \
+  --local-dir .
 ```
 
 <details>
