@@ -391,9 +391,13 @@ def build_skeleton(armature_obj: blender_utils.Object, bones_idx_dict: dict[str,
             joint.children.append(get_children(child, parent=joint))
         return joint
 
-    hips_bone = armature_obj.data.bones[f"{MIXAMO_PREFIX}Hips"]
-    hips = get_children(hips_bone)
-    return hips
+    try:
+        root_bone = armature_obj.data.bones[f"{MIXAMO_PREFIX}Hips"]
+    except KeyError:
+        warnings.warn("'Hips' bone not found, using the first root bone instead.")
+        root_bone = next(b for b in armature_obj.data.bones if b.parent is None)
+    root = get_children(root_bone)
+    return root
 
 
 def get_kinematic_tree(bone_path: str, bone_idx_dict: dict[str, int]):
@@ -715,14 +719,24 @@ class PoseData:
         and rotates body to face forward in the positive direction of z-axis
         and right-to-left oriented in the positive direction of x-axis.
         """
-        bones_idx_dict = self.meta.bones_idx_dict[0]
-        assert len(bones_idx_dict) == self.joints.shape[1]
-        hips = self.joints[:, bones_idx_dict[f"{MIXAMO_PREFIX}Hips"]]
-        rightupleg = self.joints[:, bones_idx_dict[f"{MIXAMO_PREFIX}RightUpLeg"]]
-        leftupleg = self.joints[:, bones_idx_dict[f"{MIXAMO_PREFIX}LeftUpLeg"]]
-        if torch.isnan(torch.stack([hips, rightupleg, leftupleg])).any():
-            raise RuntimeError("Cannot find hips plane")
-        return get_hips_transform(hips, rightupleg, leftupleg)
+        flag = not isinstance(self.joints, torch.Tensor)
+        joints = torch.from_numpy(np.array(self.joints)) if flag else self.joints
+        bones_idx_dict = self.meta.bones_idx_dict if flag else self.meta.bones_idx_dict[0]
+        assert len(bones_idx_dict) == joints.shape[1]
+        if any(
+            x not in bones_idx_dict
+            for x in [f"{MIXAMO_PREFIX}Hips", f"{MIXAMO_PREFIX}RightUpLeg", f"{MIXAMO_PREFIX}LeftUpLeg"]
+        ):
+            warnings.warn("Cannot find hips plane bones, return identity transform")
+            transform = torch.eye(4).to(joints).unsqueeze(0).repeat(joints.shape[0], 1, 1)
+        else:
+            hips = joints[:, bones_idx_dict[f"{MIXAMO_PREFIX}Hips"]]
+            rightupleg = joints[:, bones_idx_dict[f"{MIXAMO_PREFIX}RightUpLeg"]]
+            leftupleg = joints[:, bones_idx_dict[f"{MIXAMO_PREFIX}LeftUpLeg"]]
+            if torch.isnan(torch.stack([hips, rightupleg, leftupleg])).any():
+                raise RuntimeError("Cannot find hips plane")
+            transform = get_hips_transform(hips, rightupleg, leftupleg)
+        return transform.numpy() if flag else transform
 
     @cached_property
     def hips_transform_rest(self):
@@ -794,8 +808,8 @@ def reorganize_bone_data(
 def animate_char(
     char_path: str,
     anim_path: str,
-    template_dict: dict[str, int],
-    load_fn: Callable[..., list[blender_utils.Object]],
+    template_dict: dict[str, int] = None,
+    load_fn: Callable[..., list[blender_utils.Object]] = blender_utils.load_mixamo_anim,
     frame_list: int | list[int | None] = None,
     retarget=False,
     inplace=False,
@@ -850,6 +864,8 @@ def animate_char(
             bones_idx_dict,
             kinematic_tree,
         ) = _get_char_rest_data(char_id)
+        if template_dict is None:
+            template_dict = bones_idx_dict
         rest_verts = rest_verts.astype(np.float32)
         rest_bones = reorganize_bone_data(rest_bones.T, bones_idx_dict, template_dict=template_dict).T
         rest_bones = rest_bones.astype(np.float32)
@@ -871,6 +887,10 @@ def animate_char(
         joints_quat_list: list[np.ndarray] = []
         joints_quat_rel2rest_list: list[np.ndarray] = []
         joints_transform_list: list[np.ndarray] = []
+        armature_obj = blender_utils.get_armature_obj(obj_list)
+        for bone in armature_obj.pose.bones:
+            bone.bone.inherit_scale = "NONE"
+        blender_utils.update()
         for frame in frame_list:
             if frame == -1:
                 verts = rest_verts
@@ -915,6 +935,7 @@ def animate_char(
         joints_transform_list,
         frame_list,
         keyframes,
+        bones_idx_dict,
     )
 
 
@@ -940,6 +961,7 @@ class MixamoDataset(Dataset):
         bones_idx_dict: dict[str, int] = BONES_IDX_DICT,
         split="train",
         train_with_val=False,
+        keep_raw_skeleton=False,
     ):
         super().__init__()
         assert os.path.isdir(data_dir), f"Invalid {data_dir=}"
@@ -1010,6 +1032,9 @@ class MixamoDataset(Dataset):
 
         self.load_fn = blender_utils.load_mixamo_anim
         self.bones_idx_dict = OrderedDict(bones_idx_dict)
+        self.keep_raw_skeleton = keep_raw_skeleton
+        if self.keep_raw_skeleton:
+            warnings.warn("Keeping raw skeleton may lead to unexpected behaviors.")
 
     def __len__(self):
         return len(self.character_list) * len(self.animation_list)
@@ -1051,10 +1076,11 @@ class MixamoDataset(Dataset):
             joints_transform_list,
             frame_list,
             keyframes,
+            bones_idx_dict,
         ) = animate_char(
             self.character_list[char_index],
-            self.animation_list[anim_index],
-            template_dict=self.bones_idx_dict,
+            self.animation_list[anim_index] if self.animation_list else None,
+            template_dict=None if self.keep_raw_skeleton else self.bones_idx_dict,
             frame_list=self.sample_frames,
             load_fn=self.load_fn,
             retarget=self.retarget,
@@ -1127,7 +1153,7 @@ class MixamoDataset(Dataset):
             keyframes=keyframes,
             faces=faces,
             rest=PoseData(verts=rest_verts, joints=rest_joints, joints_tail=rest_joints_tail),
-            bones_idx_dict=self.bones_idx_dict,
+            bones_idx_dict=bones_idx_dict if self.keep_raw_skeleton else self.bones_idx_dict,
         )
         # After batchified by `collate`, values in data will follow their type hinting (torch.Tensor), but not yet now (lists of np.ndarray)
         data = PoseData(
