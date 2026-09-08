@@ -780,7 +780,7 @@ def preprocess(db: DB):
     }
 
 
-# @spaces.GPU  # always lead to "GPU task aborted"
+@spaces.GPU
 @torch.no_grad()
 def model_forward_bw(
     verts: torch.Tensor, verts_normal: torch.Tensor, pts: torch.Tensor, pts_normal: torch.Tensor
@@ -1187,7 +1187,6 @@ def init_models():
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     fix_random()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    IS_HF_ZEROGPU = str2bool(os.getenv("SPACES_ZERO_GPU", False))
 
     N = 32768
     hands_resample_ratio = 0.5
@@ -1209,8 +1208,7 @@ def init_models():
         joints_attn_causal=False,
     )
     model_bw.load("output/best/v2/bw_joints.pth")
-    model_bw.to("cpu" if IS_HF_ZEROGPU else device).eval()
-
+    model_bw.to(device).eval()
     model_joints = model_bw
 
     model_coarse = PCAE(
