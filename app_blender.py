@@ -116,7 +116,15 @@ def main(args: argparse.Namespace):
         blender_utils.remove_empty()
         blender_utils.update()
         if pose is not None:
-            pose_inv = pose
+            pose_inv = pose.copy()
+            if args.keep_raw:
+                rot_mat = np.array([
+                    [1, 0, 0, 0],
+                    [0, 0, -1, 0],
+                    [0, 1, 0, 0],
+                    [0, 0, 0, 1]
+                ], dtype=pose_inv.dtype)
+                pose_inv = rot_mat @ pose_inv @ rot_mat.T
             if not args.pose_local:
                 pose_inv[:, :3, 3] /= scaling
             blender_utils.set_bone_pose(armature_obj, pose_inv, bones_idx_dict, local=args.pose_local)
