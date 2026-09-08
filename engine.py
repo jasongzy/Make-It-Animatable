@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from functools import cached_property
 
 import torch
+import torch.amp
 import torch.nn.functional as F
 from pytorch3d.transforms import Rotate, Transform3d, random_rotations
 from torch.utils.data import DataLoader
@@ -561,7 +562,7 @@ def train_one_epoch(
         # import trimesh; trimesh.Scene([trimesh.PointCloud(verts[-1].cpu().numpy()), trimesh.PointCloud(gt.joints[-1].nan_to_num().cpu().numpy()), trimesh.PointCloud(gt.joints_tail[-1].nan_to_num().cpu().numpy())]).export("test.glb")
 
         # Forward
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             model.train()
             joints_gt = pose_gt = None
             if (
@@ -732,7 +733,7 @@ def evaluate(data_loader: DataLoader, model: PCAE, device: torch.device, args):
         else:
             verts = None
         gt = GT(data, global_transform, global_transform_rest, device)
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             output = model(
                 pts,
                 verts,

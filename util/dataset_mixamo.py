@@ -475,7 +475,7 @@ def get_plane_transform(origin: torch.Tensor, normal: torch.Tensor, tangent_ends
     target_normal = F.normalize(torch.tensor([0, 0, 1]).to(normal), dim=-1).unsqueeze(0).repeat(B, 1)
     cross = torch.cross(normal, target_normal, dim=-1)
     dot = torch.sum(normal * target_normal, dim=-1, keepdim=True)
-    cross_norm = cross.norm(dim=-1, keepdim=True)
+    # cross_norm = cross.norm(dim=-1, keepdim=True)
     skew_symmetric = torch.zeros((B, 3, 3)).to(normal)
     skew_symmetric[:, 0, 1] = -cross[:, 2]
     skew_symmetric[:, 0, 2] = cross[:, 1]
@@ -486,8 +486,20 @@ def get_plane_transform(origin: torch.Tensor, normal: torch.Tensor, tangent_ends
     rotation = (
         torch.eye(3).to(normal).unsqueeze(0).repeat(B, 1, 1)
         + skew_symmetric
-        + skew_symmetric @ skew_symmetric * ((1 - dot) / (cross_norm**2)).unsqueeze(-1)
+        # + skew_symmetric @ skew_symmetric * ((1 - dot) / (cross_norm**2)).unsqueeze(-1)
+        + skew_symmetric @ skew_symmetric * (1 / (1 + dot + 1e-8)).unsqueeze(-1)
     )
+
+    # Handle singularity where normal is anti-parallel to target_normal (dot ~ -1)
+    # In this case, we rotate 180 degrees around the X-axis.
+    # This maps (0, 0, -1) to (0, 0, 1).
+    rotation_singular = torch.tensor(
+        [[1.0, 0, 0], [0, -1.0, 0], [0, 0, -1.0]], device=normal.device, dtype=normal.dtype
+    )
+    rotation_singular = rotation_singular.unsqueeze(0).expand(B, 3, 3)
+    mask = (dot < -1.0 + 1e-6).view(B, 1, 1)
+    rotation = torch.where(mask, rotation_singular, rotation)
+
     # assert torch.allclose(torch.einsum("bij,bj->bi", rotation, normal), target_normal, atol=1e-5)
     rotation_matrix = torch.eye(4).to(normal).unsqueeze(0).repeat(B, 1, 1)
     rotation_matrix[:, :3, :3] = rotation
@@ -808,12 +820,17 @@ def animate_char(
         assert len(keyframes) > 0, "No keyframe found"
         frame_start, frame_end = min(keyframes), max(keyframes)
         keyframes = list(range(frame_start, frame_end + 1))
+        if keyframes == [1, 2]:  # for a-pose, etc.
+            keyframes = [2]
         if frame_list is None:
             frame_list = keyframes
         else:
             if isinstance(frame_list, int):
                 frame_list = [frame_list]
-            frame_list = [idx if idx is None or idx == -1 else keyframes[idx] for idx in frame_list]
+            try:
+                frame_list = [idx if idx is None or idx == -1 else keyframes[idx] for idx in frame_list]
+            except IndexError:
+                raise IndexError(f"Frame index out of range: {frame_list} with keyframes length {len(keyframes)}")
         if None in frame_list:
             rand_num = frame_list.count(None)
             frame_index_randoms = list(np.random.choice(keyframes, size=rand_num, replace=rand_num > len(keyframes)))
@@ -973,16 +990,23 @@ class MixamoDataset(Dataset):
 
         self.animation_list = sorted(glob(os.path.join(self.data_dir, animation_subdir, "*.fbx")))
         assert len(self.animation_list) > 0, f"No animation found in {self.data_dir}"
+        self.animation_list_full = self.animation_list.copy()
         if self.split != "train":
             self.animation_list = self.animation_list[:10]
+        elif extra_character_dir and len(extra_char_list) > 1000:
+            self.animation_list = self.animation_list[: len(self.animation_list) // 100]
 
+        self.extra_anim_list = None
         if self.split == "train" and extra_animation_dir:
             if isinstance(extra_animation_dir, str):
                 extra_animation_dir = [extra_animation_dir]
             for extra_dir in extra_animation_dir:
-                extra_anim_list = sorted(glob(os.path.join(extra_dir, "*.fbx")))
-                assert len(extra_anim_list) > 0, f"No extra animation found in {extra_dir}"
-                self.animation_list.extend(extra_anim_list)
+                self.extra_anim_list = sorted(glob(os.path.join(extra_dir, "*.fbx")))
+                assert len(self.extra_anim_list) > 0, f"No extra animation found in {extra_dir}"
+                self.animation_list.extend(self.extra_anim_list)
+
+            # self.animation_list = list(filter(lambda x: "i-pose" in x, self.animation_list))
+            # self.animation_list = self.animation_list[:1]
 
         self.load_fn = blender_utils.load_mixamo_anim
         self.bones_idx_dict = OrderedDict(bones_idx_dict)
@@ -996,6 +1020,20 @@ class MixamoDataset(Dataset):
         else:
             char_index, anim_index = divmod(index, len(self.animation_list))
         return char_index, anim_index
+
+    def shuffle_train_anim(self):
+        if self.split != "train":
+            return
+        if len(self.animation_list_full) > len(self.animation_list):
+            k = len(self.animation_list)
+            if self.extra_anim_list:
+                k -= len(self.extra_anim_list)
+                if k <= 0:
+                    print("Warning: `animation_list` may be modified after initialization, cannot shuffle.")
+                    return
+            self.animation_list = random.sample(self.animation_list_full, k=k)
+            if self.extra_anim_list:
+                self.animation_list.extend(self.extra_anim_list)
 
     def __getitem__(self, index: int):
         char_index, anim_index = self.get_index(index)

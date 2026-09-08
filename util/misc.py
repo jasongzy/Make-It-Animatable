@@ -248,7 +248,10 @@ class NativeScalerWithGradNormCount:
     state_dict_key = "amp_scaler"
 
     def __init__(self):
-        self._scaler = torch.cuda.amp.GradScaler()
+        try:
+            self._scaler = torch.amp.GradScaler("cuda")
+        except AttributeError:
+            self._scaler = torch.cuda.amp.GradScaler()
 
     def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True, detect_anomaly=False, named_parameters=None):
         self._scaler.scale(loss).backward(create_graph=create_graph)
@@ -337,7 +340,7 @@ def load_model(args, model_without_ddp, optimizer=None, loss_scaler=None, model_
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            checkpoint = torch.load(args.resume, map_location='cpu', weights_only=True)
         model_state_dict = checkpoint['model']
         if model_preprocess is not None:
             model_state_dict = model_preprocess(model_state_dict)
