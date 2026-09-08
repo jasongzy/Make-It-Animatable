@@ -499,6 +499,31 @@ class PCAE(nn.Module):
                 obj = getattr(obj, k)
             return obj
 
+        modules = dict(self.named_modules())
+        for weight_key in tuple(ckpt):
+            if not weight_key.endswith(".weight"):
+                continue
+            module_name = weight_key.removesuffix(".weight")
+            module = modules.get(module_name)
+            if not isinstance(module, nn.Sequential) or len(module) != 3:
+                continue
+            input_layer, _, output_layer = module
+            if not isinstance(input_layer, nn.Linear) or not isinstance(output_layer, nn.Linear):
+                continue
+            ckpt_weight = ckpt[weight_key]
+            if ckpt_weight.shape != (output_layer.out_features, input_layer.in_features):
+                continue
+            parent_name, attr = module_name.rsplit(".", 1)
+            legacy_module = nn.Linear(
+                ckpt_weight.shape[1],
+                ckpt_weight.shape[0],
+                bias=f"{module_name}.bias" in ckpt,
+                device=input_layer.weight.device,
+                dtype=input_layer.weight.dtype,
+            )
+            setattr(modules[parent_name], attr, legacy_module)
+            print(f"Restoring legacy Linear module {module_name} from checkpoint.")
+
         params2replace = []
         if self.predict_bw:
             params2replace.extend(["bw_head.weight", "bw_head.bias"])
