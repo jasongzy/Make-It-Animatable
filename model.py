@@ -556,7 +556,7 @@ class PCAE(nn.Module):
 
     def load(self, pth_path: str, epoch=-1, strict=True, adapt=True):
         pth_path = find_ckpt(pth_path, epoch=epoch)
-        checkpoint = torch.load(pth_path, map_location="cpu")
+        checkpoint = torch.load(pth_path, map_location="cpu", weights_only=True)
         model_state_dict = checkpoint["model"]
         if adapt:
             model_state_dict = self.adapt_ckpt(model_state_dict)
@@ -566,7 +566,7 @@ class PCAE(nn.Module):
 
     def load_base(self, pth_path: str):
         if self.ae_type == "vecset":
-            self.base.load_state_dict(torch.load(pth_path, map_location="cpu")["model"], strict=True)
+            self.base.load_state_dict(torch.load(pth_path, map_location="cpu", weights_only=True)["model"], strict=True)
             print(f"Loaded base model from {pth_path}")
         return self
 
