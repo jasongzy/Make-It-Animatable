@@ -1,19 +1,20 @@
 # conda create -n mia python=3.11
 # conda activate mia
 
---extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.1.2
-torchvision==0.16.2
+--extra-index-url https://download.pytorch.org/whl/cu129
+torch==2.8.0
+torchvision==0.23.0
 
 einops
 timm
--f https://data.pyg.org/whl/torch-2.1.2+cu121.html
+-f https://data.pyg.org/whl/torch-2.8.0+cu129.html
 torch-cluster
 PyMCubes
 
+--extra-index-url https://download.blender.org/pypi/
 bpy==4.3.0
 fake-bpy-module
-gradio>=5.25.0
+gradio>=5.50.0
 ipykernel
 ipympl
 matplotlib
@@ -24,7 +25,18 @@ shapely
 spaces
 tensorboard~=2.11.2
 tqdm
-trimesh
+trimesh[easy]
 # git+https://github.com/facebookresearch/pytorch3d.git@stable
 --extra-index-url https://miropsota.github.io/torch_packages_builder
-pytorch3d==0.7.7+pt2.1.2cu121
+pytorch3d==0.7.8+pt2.8.0cu129
+
+xformers==0.0.32.post2
+accelerate<1.10
+diffusers
+huggingface_hub
+scikit-image
+
+omegaconf
+transformers==4.46.0
+pymeshlab~=2023.12.post3
+opencv-contrib-python
