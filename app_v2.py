@@ -1251,6 +1251,11 @@ def init_models():
 def init_blocks():
     global demo, state, output_joints_coarse, output_normed_input, output_sample, output_joints, output_bw, output_rest_vis, output_rest_lbs, output_anim_vis, output_anim
 
+    examples_dir = os.path.abspath("data/examples")
+    try:
+        gr.set_static_paths(paths=[examples_dir])
+    except AttributeError:
+        pass
     title = "Make-It-Animatable"
     description = f"""
     <center>
@@ -1397,7 +1402,7 @@ def init_blocks():
 
                 with gr.Row(variant="panel"):
                     examples = gr.Examples(
-                        examples="./data/examples",
+                        examples=examples_dir,
                         inputs=[input_3d, input_is_gs, input_no_fingers, input_rest_pose, input_rest_parts],
                         label="Examples",
                         cache_examples=False,
